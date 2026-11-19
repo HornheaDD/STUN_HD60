@@ -539,3 +539,10 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - Tests: AppImage as a new user (fake HOME): 27 images in 22.7 s; second launch loads 27, builds 0; no Vulkan
   (VK_ICD_FILENAMES=/nonexistent): "Real-ESRGAN failed" once, game runs normally. Windows zip under Wine 11 (fresh prefix,
   launcher): 27 images built through Wine's Vulkan, byte-identical to the Linux pack. Not tested on real Windows hardware.
+
+## To do: wireframe lines are not HD yet (user report, 2026-11-19)
+- When the player's vehicle hits a boost it turns into a see-through wireframe; those lines are still low-res.
+- The hardest course has tunnel sections drawn entirely as wireframe; those lines are not upscaled either.
+- Likely cause: hd_parse_list only redraws filled polygons; outlines/lines (or the boost draw mode) are taken from the
+  original picture. Next: log the display-list ops/flags during a boost and in that tunnel, then redraw the lines at 3x5
+  (keep the see-through blending). Also still open: full-screen course map / title images (streams 1-3, 24-28).

@@ -25,26 +25,32 @@ your own `stunrun.zip`.
 What happens on first launch:
 
 * The game starts **immediately**, at 60 fps with the HD 3D scene; the skylines show the original pixels at first.
-* In the background, at the lowest priority, the game unpacks the backgrounds from the ROM and upscales them (14 images).
+* In the background, at the lowest priority, the game unpacks the backgrounds from the ROM and upscales them (27 images, including the level-start city screens).
   Level 1's skyline comes first. Each skyline switches to HD on its own as soon as it is ready; no restart is needed.
-* On a gaming graphics card this takes about 15 seconds in total (level 1 after a few seconds), so it is done before you
+* On a gaming graphics card this takes about 25 seconds in total (level 1 after a few seconds), so it is done before you
   have inserted a coin. A slower graphics card only means the original skylines stay a little longer.
-* The finished pack is saved in the game's data folder (about 40 MB), so later launches are HD from the start.
+* The finished pack is saved in the game's data folder (about 75 MB), so later launches are HD from the start.
 * Real-ESRGAN needs a graphics card with Vulkan support. Without it, the game keeps the original skylines and notes this in
   its log; nothing else changes.
 
 The colours follow the game's live palette, so fades still work, and anything drawn over a skyline (HUD, text) stays as in
-the original. The between-level city screens are not upscaled yet.
+the original. The level-start city screens are upscaled the same way (night scenes use the `realesr-animevideov3` model,
+which keeps the small window lights).
 
 Also included: an optional CRT look (MAME BGFX `crt-geom` shaders, toggled in-game with **C**), an on-screen
 statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
 
-**Planned:** HD versions of the between-level city screens, and possibly a **widescreen (16:9) hack**:
-widening the game's 3D view so it fills modern screens, with the HUD kept centred. Not started yet; it depends on how far
-the game's own projection and clipping limits can be pushed without objects popping in at the edges.
+**Planned:**
+
+* HD **wireframe lines**: the see-through wireframe the player's vehicle turns into on a boost, and the all-wireframe tunnel
+  sections on the hardest course, are still drawn at the original resolution.
+* HD versions of the full-screen course map and title images.
+* Possibly a **widescreen (16:9) hack**: widening the game's 3D view so it fills modern screens, with the HUD kept
+  centred. Not started yet; it depends on how far the game's own projection and clipping limits can be pushed without
+  objects popping in at the edges.
 
 **Download:** HD builds will appear on the [Releases page](https://github.com/HornheaDD/STUN_HD60/releases) (not
-released yet; they will include Real-ESRGAN, about 45 MB).
+released yet; they include Real-ESRGAN, about 50 MB).
 The 60 fps-only builds are on the [STUN60 Releases page](https://github.com/HornheaDD/STUN60/releases/latest).
 
 **No ROMs are included.** You need your own MAME 0.285 `stunrun.zip` (parent set).
