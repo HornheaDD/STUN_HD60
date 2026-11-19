@@ -21,6 +21,10 @@ ROM are in progress.
 Also included: an optional CRT look (MAME BGFX `crt-geom` shaders, toggled in-game with **C**), an on-screen
 statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
 
+**Planned:** upscaled skyline backgrounds built from your own ROM (in progress), and possibly a **widescreen (16:9) hack**:
+widening the game's 3D view so it fills modern screens, with the HUD kept centred. Not started yet; it depends on how far
+the game's own projection and clipping limits can be pushed without objects popping in at the edges.
+
 **Download:** HD builds will appear on the [Releases page](https://github.com/HornheaDD/STUN_HD60/releases).
 The 60 fps-only builds are on the [STUN60 Releases page](https://github.com/HornheaDD/STUN60/releases/latest).
 
