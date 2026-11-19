@@ -540,9 +540,27 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
   (VK_ICD_FILENAMES=/nonexistent): "Real-ESRGAN failed" once, game runs normally. Windows zip under Wine 11 (fresh prefix,
   launcher): 27 images built through Wine's Vulkan, byte-identical to the Linux pack. Not tested on real Windows hardware.
 
-## To do: wireframe lines are not HD yet (user report, 2026-11-19)
-- When the player's vehicle hits a boost it turns into a see-through wireframe; those lines are still low-res.
-- The hardest course has tunnel sections drawn entirely as wireframe; those lines are not upscaled either.
-- Likely cause: hd_parse_list only redraws filled polygons; outlines/lines (or the boost draw mode) are taken from the
-  original picture. Next: log the display-list ops/flags during a boost and in that tunnel, then redraw the lines at 3x5
-  (keep the see-through blending). Also still open: full-screen course map / title images (streams 1-3, 24-28).
+## Wireframe lines in HD DONE (2026-11-19, user report): boost wireframe + all-wireframe scenes, local commit only
+- Probe: scripts/re-probes/wf/wf.lua (per list: op counts, op-7 poly flag classes, FFF77E60, level $FF9578 word; env AY=255
+  = Advanced course (stick Y held until the trigger), LEV=n forces the level, FORCE=bits ORs into FFF77E60 after frame 1300,
+  SNAPS="f1 f2", TAG). Output scripts/re-probes/wf/out/ (ignored). Course select: AD Stick Y 255 = Advanced (Labyrinth L11).
+- GSP poly handler (re-probes/col/gsp_poly.asm): A13 = FFF77E60 (copied per list from list header +0x110 by opD/A/B code).
+  A13 bit 3 -> EVERY poly goes to the outline routine FFF45800 (checked before the mode); else mode bits 10-11:
+  0 solid, 1 = pattern 15151515 (3 of 4 px; boost dissolve), 2 = 01010101 (1 of 4; shadow), 3 = outline (boost wireframe).
+  Colour index (flags & 0xFF) == 4 also gets 15151515 in modes 0/2. Pattern phase measured: mode 1 skips x%4==3 on even
+  list-y rows, x%4==1 on odd (mode 2 lights x%4==0 even / 2 odd).
+  Outline routine: FILL top row xl..xr; per segment (n>1) LINE left edge from current point by (floor(sl*(n-1)) (16.16, low
+  32 bits), n-1), then the right edge unless A13 bit 5; current points advance by those integer deltas; FILL bottom row.
+- Boost (headless default run, level 2 ~frame 3810-4090): mode 1 dissolve ~4 lists, then 104 mode-3 polys (the craft).
+  FFF77E60 stayed 0 in levels 11-22 headless (scripted driving dies early); bit 3 forced looks like the user's
+  "tunnel entirely wireframe". Same routine either way.
+- harddriv_v.cpp: s60hd_poly.outline/left_only + corner points (vy, lxi/rxi game-integer, lxf/rxf exact); list.gflags.
+  Step 1 marks pixels within 1 px of each game-integer outline line (up to 4 pens per pixel, m_hd_wpen/m_hd_wcnt; cleared
+  by later filled polys) -> class 3 = wireframe pixel (background borrowed like class 1, HD bg drawn there too). Step 3
+  draws outline polys in list order as anti-aliased round-capped lines, width STUN60_HDLINE HD px (default 2), skipping
+  class-2 pixels. Mode 1 / idx 4: exp only on the pattern's pixels, HD = colour at 75% over what is behind.
+- Parser bug fixed: the segment loop required a+64 < end+16 before reading the FFFFFFFF end marker, so the last 1-2 polys
+  of every op-7 block were rejected (stayed low-res in all scenes). Now: marker needs 2 words, a segment 5.
+- Tests: verify 1792/1792 exact to frame 6600, 58.0 fps (identical to the released hd-v1.0 binary). HD compose cost with
+  everything wireframe (forced) ~2.5 ms/frame vs ~0.8 normal. Comparisons: hd-experiment/live-hd/wireframe-*.png.
+- Not done: bit 12 polys (alt handler FFF48FC0, scaled 2D sprites such as the red arrow decals) are still low-res.

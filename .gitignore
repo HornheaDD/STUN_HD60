@@ -26,6 +26,7 @@ scripts/re-probes/col/t[0-9]*.txt
 scripts/re-probes/bg/*.asm
 scripts/re-probes/bg/*.bin
 scripts/re-probes/bg/out/
+scripts/re-probes/wf/out/
 hdpack/samples/
 hdpack/pack*/
 package/out-hd/

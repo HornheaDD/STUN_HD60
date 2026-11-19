@@ -14,7 +14,9 @@ extra in-between frames per tick, with the camera and moving objects interpolate
 of the scene, not blended or AI-generated frames.
 
 **HD redraw:** the patched driver reads the game's own polygon list (already projected to the screen by the game) and
-redraws every 3D polygon at 3x5 the resolution on a second screen, with the game's colours. Everything that is not 3D
+redraws every 3D polygon at 3x5 the resolution on a second screen, with the game's colours. The wireframe the vehicle turns into on a
+boost, and scenes drawn entirely as wireframe, are redrawn as smooth thin lines (`STUN60_HDLINE` = line width in HD
+pixels, default 2); the see-through dissolve at the start of a boost is redrawn as a smooth transparent fill. Everything that is not 3D
 (HUD, text) is taken from the original picture and scaled up.
 
 **HD backgrounds:** the skyline panoramas behind the track (canyon, hills, plains, farmland, city, galaxy) are the game's own
@@ -42,8 +44,6 @@ statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
 
 **Planned:**
 
-* HD **wireframe lines**: the see-through wireframe the player's vehicle turns into on a boost, and the all-wireframe tunnel
-  sections on the hardest course, are still drawn at the original resolution.
 * HD versions of the full-screen course map and title images.
 * Possibly a **widescreen (16:9) hack**: widening the game's 3D view so it fills modern screens, with the HUD kept
   centred. Not started yet; it depends on how far the game's own projection and clipping limits can be pushed without
