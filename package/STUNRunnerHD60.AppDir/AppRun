@@ -1,0 +1,40 @@
+#!/bin/sh
+# S.T.U.N. Runner HD60 (custom MAME 0.285 + interpolation script + HD redraw). Put stunrun.zip next to this file.
+HERE="$(dirname "$(readlink -f "$0")")"
+if [ -n "$APPIMAGE" ]; then OUTSIDE="$(dirname "$APPIMAGE")"; else OUTSIDE="$HERE"; fi   # folder holding the AppImage, or the unpacked folder itself
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/stun60-hd"
+SHARE="$HERE/usr/share/stun60"
+mkdir -p "$DATA/roms" "$DATA/cfg" "$DATA/nvram" "$DATA/snap"
+ROMPATH="$OUTSIDE;$OUTSIDE/roms;$DATA/roms;${XDG_DATA_HOME:-$HOME/.local/share}/stun60/roms;$HOME/mame/roms"
+found=""
+for d in "$OUTSIDE" "$OUTSIDE/roms" "$DATA/roms" "${XDG_DATA_HOME:-$HOME/.local/share}/stun60/roms" "$HOME/mame/roms"; do
+  if [ -e "$d/stunrun.zip" ] || [ -d "$d/stunrun" ]; then found=1; fi
+done
+if [ -z "$found" ]; then
+  msg="stunrun.zip not found. Put it next to the app, or in $DATA/roms."
+  zenity --error --text="$msg" 2>/dev/null || kdialog --error "$msg" 2>/dev/null || notify-send "S.T.U.N. Runner HD60" "$msg" 2>/dev/null
+  echo "$msg" >&2; exit 1
+fi
+# Screen effect: C cycles CRT deluxe / CRT sharp / off in-game (saved in cfg/stunrun.cfg).
+# First launch defaults to CRT deluxe. STUN60_CRT=deluxe|geom|off forces one.
+case "${STUN60_CRT:-}" in
+  deluxe) set -- -bgfx_screen_chains crt-geom-deluxe "$@" ;;
+  geom)   set -- -bgfx_screen_chains crt-geom "$@" ;;
+  off)    set -- -bgfx_screen_chains default "$@" ;;
+  *)      grep -q 'chain=' "$DATA/cfg/stunrun.cfg" 2>/dev/null || set -- -bgfx_screen_chains crt-geom-deluxe "$@" ;;
+esac
+export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export STUN60_CLOCK="${STUN60_CLOCK:-maincpu=3,gsp=4,adsp=8}"
+export STUN60_DATA="$DATA"
+# HD redraw: second screen at 3x5 the resolution (H switches HD / original in-game). STUN60_HD= (empty) turns it off.
+export STUN60_HD="${STUN60_HD-3x5}"
+# HD backgrounds: built from your ROM on first launch, in the background (the original skylines show until each is ready),
+# then kept in $DATA/hdpack. Needs a graphics card with Vulkan; without it the original skylines stay.
+export STUN60_HDPACK="${STUN60_HDPACK:-$DATA/hdpack}"
+export STUN60_ESRGAN="${STUN60_ESRGAN:-$SHARE/realesrgan/realesrgan-ncnn-vulkan}"
+cd "$DATA"
+exec "$HERE/usr/bin/stun60" stunrun -inipath "$DATA" -rompath "$ROMPATH" \
+  -cfg_directory "$DATA/cfg" -nvram_directory "$DATA/nvram" -snapshot_directory "$DATA/snap" \
+  -video bgfx -bgfx_path "$SHARE/bgfx" -artpath "$DATA/artwork;$SHARE/artwork" \
+  -skip_gameinfo -sound portaudio -audio_latency 3 \
+  -autoboot_script "$SHARE/stunrun-interp60.lua" "$@" 2> "$DATA/stderr.log"

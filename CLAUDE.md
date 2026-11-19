@@ -523,3 +523,19 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
   75 MB. Verify 4012/4012, 58.7 fps. Not covered: header-less full-screen images (course map, title; streams 1-3, 24-28).
 - Running several emulators at once starves the nice-19 builder (by design); kill stray test emulators (an orphan from the
   kwin test ran for 1.5 h).
+
+## HD packages built (2026-11-19), NOT released (user: release later in the day)
+- package/out-hd/: STUNRunnerHD60-x86_64.AppImage (52 MB), STUNRunnerHD60-linux-x86_64.tar.gz (54 MB, run -> AppRun
+  symlink), STUNRunnerHD60-windows-x64.zip (50 MB; zipped with Python zipfile, no `zip` here). v1.0 files in package/out untouched.
+- Linux: package/STUNRunnerHD60.AppDir (copy of the v1 AppDir): stripped stun60 (glibc <= 2.36), Lua script, AppRun with
+  data dir ~/.local/share/stun60-hd (also finds ROMs in .../stun60/roms), STUN60_HD=3x5, STUN60_HDPACK=$DATA/hdpack,
+  STUN60_ESRGAN=$SHARE/realesrgan/realesrgan-ncnn-vulkan; bundled realesrgan (needs glibc 2.29, system libvulkan) +
+  models realesrgan-x4plus + realesr-animevideov3-x4 + LICENSE.txt; libgomp.so.1 from Debian 12 libgomp1_12.2.0-14+deb12u1
+  (sha256 48fec46b...; glibc 2.34; never CachyOS's x86-64-v3 build).
+- Windows: launcher win/launcher-hd.c -> STUNRunnerHD60.exe (same flags as v1 + STUN60_HD/HDPACK/ESRGAN defaults);
+  bin\realesrgan\ = official windows zip's exe + vcomp140.dll + the 2 models; vulkan-1.dll comes with the GPU driver.
+  Windows realesrgan zip unpacked in build/tools/realesrgan-win.
+- README-HD.txt = end-user notes (first-launch explanation; CRLF copy in the zip).
+- Tests: AppImage as a new user (fake HOME): 27 images in 22.7 s; second launch loads 27, builds 0; no Vulkan
+  (VK_ICD_FILENAMES=/nonexistent): "Real-ESRGAN failed" once, game runs normally. Windows zip under Wine 11 (fresh prefix,
+  launcher): 27 images built through Wine's Vulkan, byte-identical to the Linux pack. Not tested on real Windows hardware.

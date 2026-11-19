@@ -28,3 +28,6 @@ scripts/re-probes/bg/*.bin
 scripts/re-probes/bg/out/
 hdpack/samples/
 hdpack/pack*/
+package/out-hd/
+package/STUNRunnerHD60.AppDir/usr/
+package/win/STUNRunnerHD60.exe

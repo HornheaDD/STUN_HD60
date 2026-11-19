@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=S.T.U.N. Runner HD60
+Comment=S.T.U.N. Runner at 60 fps with an HD redraw (custom MAME). H = HD on/off, C = CRT, O = overlay
+Exec=AppRun
+Icon=stunrunner60
+Terminal=false
+Categories=Game;ArcadeGame;
