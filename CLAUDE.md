@@ -445,3 +445,18 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
   tl2.lua (frame timeline), dump.lua (68010 RAM dumps per tick), who.lua (writer PCs); copies kept in `~/mame/scripts/re-probes/`.
 - Working files: scratchpad `re/` (traces, probe scripts) are temporary; anything worth keeping
   goes in `~/mame/scripts/`.
+
+## Repo move + red-screen fix (2026-11-18, late)
+- **Repos:** development continues in github.com/HornheaDD/STUN_HD60 (git remote `hd`, public, empty until first push).
+  STUN60 (`origin`) stays frozen as the 60 fps-only v1.0; it only gets a README pointer (branch `stun60-pointer`,
+  worktree ../stun60-pointer). Push to either only when the user says so.
+- **Red picture after H (HD off) = MAME BGFX bug, fixed in the patch** (`src/osd/modules/render/bgfx/chainmanager.*`):
+  chain_manager::update_screen_textures sets up a slot's converter ("XXconvert") and texture names once; the HD screen is
+  RGB32 (format 2), the original PALETTE16 (format 1), so after a view switch the raw palette indices were shown (red).
+  Now it tracks the format per slot and on a change drops source/screen/palette textures and reload_chains().
+  Verified in an isolated `dbus-run-session kwin_wayland --virtual --xwayland` run: 5 toggles, "chain reloaded" each
+  time (-verbose), 100% speed. Screen capture there is blocked by the permission classifier: user confirms visually.
+- Lua: H logic is now `hd_toggle()`, exported as global STUN60_HD_TOGGLE for scripted tests.
+- **Next: HD backgrounds (user chose "option 2"):** hook the display-list bitmap opcodes (4/9/D), identify each background
+  image (ROM source + position), extract from the user's ROM, upscale, draw the HD version on the HD screen. ROM-derived:
+  the repo ships only the tool; the pack is built on the player's machine on first run (never commit images).
