@@ -23,3 +23,6 @@ scripts/re-probes/col/*.bin
 scripts/re-probes/col/*.pal
 scripts/re-probes/col/c[0-9]*.txt
 scripts/re-probes/col/t[0-9]*.txt
+scripts/re-probes/bg/*.asm
+scripts/re-probes/bg/*.bin
+scripts/re-probes/bg/out/

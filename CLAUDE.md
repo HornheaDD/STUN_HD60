@@ -460,3 +460,18 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - **Next: HD backgrounds (user chose "option 2"):** hook the display-list bitmap opcodes (4/9/D), identify each background
   image (ROM source + position), extract from the user's ROM, upscale, draw the HD version on the HD screen. ROM-derived:
   the repo ships only the tool; the pack is built on the player's machine on first run (never commit images).
+
+## HD backgrounds, step 1 DONE (2026-11-19): images decoded straight from the ROM
+- Display list op 8 = bitmap blit: words x, y, flags (0x20 = transparent pen 0), address (hi word, lo word). Image at the
+  address in GSP RAM: header 6 words (height, width, ...) then width*height 8-bit pens (pixel = palettebank*256 + pen).
+  Skyline = two 512x48 halves (FFE00000, FFE30060) drawn at x and x+512, y=0x70 in play; also 512x96 course maps
+  (y=0x40), 340x140 panels, a 72x72 animation (24 frames), small icons. Op 9 = palette load, op D = image pointer slots,
+  op 4 = text. Handlers disassembled with re-probes/bg/dasm_ops.lua (GSP dasm length is in bits: x16).
+- The 68010 unpacks them at level load: routine 022766 (incremental) / 0225E4, image number $FF9BCC -> pointer table $BFE00
+  (68010 ROM; entry 0 unused), output via host port $C0000C into GSP FFE00000. Format documented in hdpack/stunbg.py.
+- **hdpack/stunbg.py zip outdir**: standalone extractor from the user's own stunrun.zip (no MAME needed). 80 images;
+  all 25 images captured live (re-probes/bg/extract.lua, raw2png.py) match byte-exact. Streams 1-3, 24-28 have no header
+  (full-screen 512x240 / 512x208 buffers, loaded elsewhere; not decoded further).
+- Output is pens only. Still open: per-level palettes (op 9 data in the 68010 ROM) to turn pens into RGB without running the
+  game; then upscale (pick an upscaler), then draw the HD skyline in hd_compose (blit position from the op 8 args).
+- ROM-derived output never goes in git (re-probes/bg/out/ is ignored; extractor output goes outside the repo).
