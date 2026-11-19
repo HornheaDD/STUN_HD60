@@ -574,6 +574,18 @@ local function crt_cycle()
   end
 end
 STUN60_CRT_CYCLE = crt_cycle  -- for headless/scripted tests
+local function hd_toggle()
+  if hdscr then
+    hd_on = not hd_on
+    local f = io.open(HDF, "w"); if f then f:write(hd_on and "on" or "off", "\n"); f:close() end
+    crt_msg = hd_on and "HD redraw on" or "Original resolution"
+  else
+    crt_msg = "HD redraw not enabled (STUN60_HD)"
+  end
+  crt_msg_until = mach.time:as_double() + 2.5
+  L("hd: " .. tostring(hd_on))
+end
+STUN60_HD_TOGGLE = hd_toggle   -- for headless/scripted tests
 local low_secs = 0           -- seconds of gameplay in a row with few in-between frames
 local function overlay_second()  -- called once per second, after the counters are latched
   -- only ADSP-time skips count: screens that are slow for the GSP (e.g. the attract-mode story panel,
@@ -595,17 +607,7 @@ function draw_overlay()
   if kc and not keyc_was then crt_cycle() end
   keyc_was = kc
   local kh = inp:code_pressed(key_h)
-  if kh and not keyh_was then
-    if hdscr then
-      hd_on = not hd_on
-      local f = io.open(HDF, "w"); if f then f:write(hd_on and "on" or "off", "\n"); f:close() end
-      crt_msg = hd_on and "HD redraw on" or "Original resolution"
-    else
-      crt_msg = "HD redraw not enabled (STUN60_HD)"
-    end
-    crt_msg_until = mach.time:as_double() + 2.5
-    L("hd: " .. tostring(hd_on))
-  end
+  if kh and not keyh_was then hd_toggle() end
   keyh_was = kh
   if hd_applied ~= hd_on then apply_hd() end
   if crt_msg and mach.time:as_double() < crt_msg_until then

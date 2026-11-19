@@ -30,7 +30,7 @@ statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
   GSP (x4) and ADSP (x8), set through the `STUN60_CLOCK` environment variable.
 * The patch (`stun60-mame0285.patch`) also adds a few helper commands for the script (fast ADSP state snapshot/restore,
   output capture, list building), fixes a sound-latch status bit that loses music commands at higher clocks,
-  and adds a small Lua binding used for the CRT toggle.
+  adds a small Lua binding used for the CRT toggle, and fixes a BGFX bug when a view switch changes the screen's pixel format.
 
 `CLAUDE.md` is the full research and development log (memory maps, protocols, measurements, dead ends).
 
@@ -52,7 +52,7 @@ Controls: MAME defaults (5 = coin, 1 = start, Tab = menu, Esc = quit), **O** = o
 
 | Path | What |
 |---|---|
-| `stun60-mame0285.patch` | All source changes to MAME 0.285 (`src/mame/atari/harddriv*`, `src/frontend/mame/luaengine.cpp`) |
+| `stun60-mame0285.patch` | All source changes to MAME 0.285 (`src/mame/atari/harddriv*`, `src/frontend/mame/luaengine.cpp`, `src/osd/modules/render/bgfx/chainmanager*`) |
 | `scripts/stunrun-interp60.lua` | The 60 fps interpolation script (older versions kept as `.v*`) |
 | `scripts/run-stun60.sh` | Local launcher |
 | `scripts/re-probes/` | Reverse-engineering probes and headless test drivers (`live_test.lua` = scripted game + verify) |
@@ -66,7 +66,7 @@ the probes in `scripts/re-probes/` regenerate them from your own ROM set.
 ## Credits and license
 
 Built on [MAME](https://www.mamedev.org/) 0.285. The MAME source files changed by `stun60-mame0285.patch`
-(`harddriv.cpp`, `harddriv.h`, `harddriv_m.cpp`, `luaengine.cpp`) are BSD-3-Clause, and the patch keeps their license.
+(`harddriv*.cpp`, `harddriv.h`, `luaengine.cpp`, `chainmanager.*`) are BSD-3-Clause, and the patch keeps their license.
 Binaries built from it are MAME builds and fall under MAME's overall license (GPL-2.0-or-later).
 Everything else in this repository (scripts, tools, packaging) is under the MIT License, see `LICENSE`.
 S.T.U.N. Runner is © 1989 Atari Games. This project is not affiliated with Atari or the MAME team.
