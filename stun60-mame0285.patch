@@ -12,10 +12,21 @@
  
  #include "machine/timer.h"
  #include "machine/watchdog.h"
-@@ -1849,6 +1854,101 @@
+@@ -363,6 +368,7 @@
+ 	m_harddriv_sound(*this, "harddriv_sound"),
+ 	m_jsa(*this, "jsa"),
+ 	m_screen(*this, "screen"),
++	m_hdscreen(*this, "hdscreen"),
+ 	m_duartn68681(*this, "duartn68681"),
+ 	m_adc8(*this, "adc8"),
+ 	m_lamps(*this, "lamp%u", 1U),
+@@ -1847,6 +1853,102 @@
+ {
+ 	init_stunrun();
  	harddriv_state::device_start();
- }
- 
++	hd_start();   // stun60 HD
++}
++
 +// stun60 (local patch): apply CPU clock scales (same as the Slider Controls overclock) from the
 +// environment, e.g. STUN60_CLOCK="maincpu=4,gsp=4,adsp=6". Unset = stock clocks.
 +void stunrun_board_device_state::device_reset()
@@ -109,12 +120,18 @@
 +		m_s60_result = same;
 +		break; }
 +	}
-+}
-+
- DEFINE_DEVICE_TYPE(STUNRUN_BOARD, stunrun_board_device_state, "stunrun_board", "Stun Runner Board Device")
+ }
  
- stunrun_board_device_state::stunrun_board_device_state(const machine_config &mconfig, const char *tag, device_t *owner, uint32_t clock)
-@@ -4802,7 +4902,10 @@
+ DEFINE_DEVICE_TYPE(STUNRUN_BOARD, stunrun_board_device_state, "stunrun_board", "Stun Runner Board Device")
+@@ -1867,6 +1969,7 @@
+ 
+ 	/* video hardware */
+ 	m_screen->set_raw(5000000*2, 317*2, 0, 256*2, 262, 0, 228);
++	hd_config(config);   // stun60 HD: optional second screen
+ 
+ 	/* sund hardware */
+ 	SPEAKER(config, "mono").front_center();
+@@ -4802,7 +4905,10 @@
  
  	// if we have a JSA board, install the read/write handlers
  	if (m_jsa.found())
@@ -126,7 +143,7 @@
  
  	/* install handlers for the compact driving games' inputs */
  	if (compact_inputs)
-@@ -5094,6 +5197,36 @@
+@@ -5094,6 +5200,36 @@
  
  	/* set up adsp speedup handlers */
  	m_adsp->space(AS_DATA).install_read_handler(0x1fff, 0x1fff, read16smo_delegate(*this, FUNC(harddriv_state::hdadsp_speedup_r)));
@@ -165,7 +182,7 @@
  
 --- a/src/mame/atari/harddriv.h
 +++ b/src/mame/atari/harddriv.h
-@@ -384,6 +384,13 @@
+@@ -384,6 +384,34 @@
  
  	required_region_ptr<uint16_t> m_sim_memory;
  	uint16_t                m_som_memory[0x8000/2]{};
@@ -176,10 +193,31 @@
 +	uint16_t                m_s60_param[4]{};
 +	uint16_t                m_s60_result = 0;
 +	void s60_command(uint16_t cmd);
++	// stun60 HD (local patch): a second screen showing the 3D scene redrawn at SX x SY times the resolution
++	// (env STUN60_HD="3x5"; unset = off). Polygons come from the display list the GSP just drew.
++	struct s60hd_poly { uint16_t flags; uint8_t pen; int y0; std::vector<int64_t> l, r; };
++	struct s60hd_list { std::vector<s60hd_poly> polys; };
++	optional_device<screen_device> m_hdscreen;
++	int                     m_hd_sx = 0, m_hd_sy = 0;
++	std::shared_ptr<s60hd_list> m_hd_pending, m_hd_shown, m_hd_cur, m_hd_done_list;
++	std::vector<uint16_t>   m_hd_lowres, m_hd_done;     // 512 x 256 pens: frame being captured / last complete frame
++	int                     m_hd_w = 512, m_hd_h = 240;
++	std::vector<int16_t>    m_hd_exp;                   // expected pen per low-res pixel (-1 = no polygon)
++	std::vector<uint8_t>    m_hd_cls;                   // 0 background, 1 3D, 2 drawn over the 3D scene
++	memory_passthrough_handler m_hd_tap;
++	uint32_t                m_hd_lists = 0, m_hd_frames = 0;
++	void hd_config(machine_config &config);
++	void hd_start();
++	void hd_parse_list();
++	void hd_capture_line(screen_device &screen, int scanline, const uint16_t *dest, int x0, int x1);
++	uint32_t hd_screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect);
++	void hd_compose(bitmap_rgb32 &bitmap);
++	bitmap_rgb32            m_hd_bitmap;              // composed right after the low-res frame completes (no lag)
++	bool                    m_hd_always = false;
  	uint16_t *              m_adsp_pgm_memory_word = 0;
  
  	uint16_t *              m_ds3_sdata_memory = 0;
-@@ -676,7 +683,7 @@
+@@ -676,7 +704,7 @@
  protected:
  	virtual void device_add_mconfig(machine_config &config) override ATTR_COLD;
  	virtual void device_start() override ATTR_COLD;
@@ -205,6 +243,339 @@
  }
  
  uint16_t harddriv_state::hd68k_port0_r()
+--- a/src/mame/atari/harddriv_v.cpp
++++ b/src/mame/atari/harddriv_v.cpp
+@@ -9,6 +9,9 @@
+ #include "emu.h"
+ #include "cpu/tms34010/tms34010.h"
+ #include "harddriv.h"
++#include "render.h"
++
++#include <chrono>
+ 
+ 
+ 
+@@ -450,7 +453,320 @@
+ 			color = vram_base[coloridx >> 1];
+ 		dest[x] = m_gfx_palettebank * 256 + color;
+ 	}
++	if (m_hd_sx)
++		hd_capture_line(screen, scanline, dest, params->heblnk, params->hsblnk);   // stun60 HD
+ 
+ 	if (scanline == screen.visible_area().bottom())
+ 		display_speedups();
+ }
++
++
++/*************************************
++ *
++ *  stun60 HD (local patch): redraw the S.T.U.N. Runner 3D scene at a higher resolution.
++ *
++ *  The GSP draws each display list into a frame buffer; the list's 3D block (opcode 7) holds
++ *  screen-space polygons whose edges are given as 16.16 slopes, so they can be rasterized at any
++ *  resolution. A second screen ("hdscreen", STUN60_HD="SXxSY", default 3x5) shows each frame as:
++ *    - every low-res pixel scaled up SX x SY (background bitmaps, HUD, text),
++ *    - the 3D polygons redrawn at full resolution on top, except where something was drawn over
++ *      the 3D scene (a low-res pixel whose colour doesn't match the polygon that should be there).
++ *  Low-res raster rules match the GSP exactly (verified pixel-exact offline, see re-probes/col).
++ *
++ *************************************/
++
++void harddriv_state::hd_config(machine_config &config)
++{
++	const char *env = std::getenv("STUN60_HD");
++	if (!env || !*env || !std::strcmp(env, "0"))
++		return;
++	int sx = 3, sy = 5;
++	if (std::sscanf(env, "%dx%d", &sx, &sy) != 2 || sx < 1 || sx > 8 || sy < 1 || sy > 8)
++		sx = 3, sy = 5;
++	m_hd_sx = sx;
++	m_hd_sy = sy;
++	// keep the original screen updating even when only the HD screen is in view (we read its pixels)
++	m_screen->set_video_attributes(VIDEO_UPDATE_BEFORE_VBLANK | VIDEO_ALWAYS_UPDATE);
++	SCREEN(config, m_hdscreen, SCREEN_TYPE_RASTER);
++	m_hdscreen->set_refresh_hz(5000000.0 * 2 / (317 * 2 * 262));
++	m_hdscreen->set_size(512 * sx, 240 * sy);
++	m_hdscreen->set_visarea(0, 512 * sx - 1, 0, 240 * sy - 1);
++	m_hdscreen->set_screen_update(FUNC(harddriv_state::hd_screen_update));
++	// composed only while the HD screen is in view, unless a headless test asks for it
++	m_hd_always = std::getenv("STUN60_HDALWAYS") || std::getenv("STUN60_HDDEBUG");
++	if (m_hd_always)
++		m_hdscreen->set_video_attributes(VIDEO_ALWAYS_UPDATE);
++}
++
++void harddriv_state::hd_start()
++{
++	if (!m_hd_sx || !m_hdscreen)
++		return;
++	m_hd_lowres.assign(512 * 256, 0);
++	m_hd_done.assign(512 * 256, 0);
++	m_hd_bitmap.allocate(512 * m_hd_sx, 240 * m_hd_sy);
++	m_hd_bitmap.fill(0xff000000);
++	m_hd_always = std::getenv("STUN60_HDALWAYS") || std::getenv("STUN60_HDDEBUG");
++	std::fprintf(stderr, "stun60: HD screen %dx%d (x%d, x%d)\n", 512 * m_hd_sx, 240 * m_hd_sy, m_hd_sx, m_hd_sy);
++	address_space &gsp = m_gsp->space(AS_PROGRAM);
++	// FFF71680: set when the GSP has finished drawing a list, cleared at the vblank flip that shows it
++	m_hd_tap = gsp.install_write_tap(0xfff71680, 0xfff7168f, "s60hd",
++			[this] (offs_t offset, u16 &data, u16 mem_mask)
++			{
++				if (data)
++					hd_parse_list();
++				else if (m_hd_pending)
++				{
++					m_hd_shown = std::move(m_hd_pending);
++					m_hd_pending.reset();
++				}
++			});
++}
++
++// Parse the list the GSP just drew (its address is at FFF77F30/40) into polygons.
++void harddriv_state::hd_parse_list()
++{
++	address_space &gsp = m_gsp->space(AS_PROGRAM);
++	auto w = [&gsp] (uint32_t a) -> uint16_t { return gsp.read_word(a); };
++	const uint32_t ptr = w(0xfff77f30) | (uint32_t(w(0xfff77f40)) << 16);
++	auto list = std::make_shared<s60hd_list>();
++	m_hd_lists++;
++
++	for (int k = 0; k < 1200; k++)
++	{
++		const uint32_t p = ptr + 16 * k;
++		if (w(p) != 0x7000)
++			continue;
++		// opcode 7 block: word[0] = count, offset table at base + count words (ends with FFFF),
++		// polygon records at base + offset
++		const uint32_t base = p + 16;
++		const uint32_t cnt = w(base);
++		if (cnt < 2 || cnt > 0x2000)
++			continue;
++		bool ok = false;
++		std::vector<uint16_t> offs;
++		for (uint32_t i = 0, a3 = base + cnt * 16; i < 2048; i++, a3 += 16)
++		{
++			const uint16_t off = w(a3);
++			if (off & 0x8000) { ok = true; break; }
++			if (off == 0 || off >= cnt) break;
++			offs.push_back(off);
++		}
++		if (!ok)
++			continue;
++
++		const uint32_t end = base + cnt * 16;
++		for (uint16_t off : offs)
++		{
++			uint32_t a = base + off * 16;
++			const uint16_t f = w(a); a += 16;
++			if (f & 0x9000)             // bit 15 = skip, bit 12 = alternate handler (not decoded): leave to the low-res image
++				continue;
++			s60hd_poly poly;
++			poly.flags = f;
++			poly.pen = w(0xfff71d20 + 16 * (f & 0x3ff)) & 0xff;
++			const int xl = int16_t(w(a)), xr = int16_t(w(a + 16));
++			poly.y0 = w(a + 32);
++			a += 48;
++			// edge accumulators: 32.32 fixed point, fraction starts at 0.5 (GSP rounding)
++			int64_t lx = (int64_t(xl) << 32) + 0x80000000LL, rx = (int64_t(xr) << 32) + 0x80000000LL;
++			poly.l.push_back(lx);
++			poly.r.push_back(rx);
++			bool good = false;
++			for (int seg = 0; seg < 512 && a + 64 < end + 16; seg++)
++			{
++				const uint32_t sr = w(a) | (uint32_t(w(a + 16)) << 16);
++				if (sr == 0xffffffff) { good = true; break; }
++				const uint32_t sl = w(a + 32) | (uint32_t(w(a + 48)) << 16);
++				const int n = w(a + 64);
++				a += 80;
++				if (n > 512 || poly.l.size() + n > 1024) break;
++				for (int j = 0; j < n - 1; j++)
++				{
++					lx += int64_t(int32_t(sl)) << 16;
++					rx += int64_t(int32_t(sr)) << 16;
++					poly.l.push_back(lx);
++					poly.r.push_back(rx);
++				}
++			}
++			if (good)
++				list->polys.push_back(std::move(poly));
++		}
++		break;
++	}
++	m_hd_pending = std::move(list);
++}
++
++void harddriv_state::hd_capture_line(screen_device &screen, int scanline, const uint16_t *dest, int x0, int x1)
++{
++	const rectangle &vis = screen.visible_area();
++	const int row = scanline - vis.top();
++	if (row < 0 || row >= 256)
++		return;
++	if (row == 0)
++		m_hd_cur = m_hd_shown;         // the list on screen during this frame
++	uint16_t *out = &m_hd_lowres[row * 512];
++	for (int x = vis.left(), i = 0; x <= vis.right() && i < 512; x++, i++)
++		out[i] = (x >= x0 && x < x1) ? dest[x] : 0;
++	if (scanline == vis.bottom())
++	{
++		m_hd_done.swap(m_hd_lowres);
++		m_hd_done_list = m_hd_cur;
++		m_hd_w = std::min(vis.width(), 512);
++		m_hd_h = std::min(vis.height(), 256);
++		m_hd_frames++;
++		// compose now, so the HD screen shows this frame (its own refresh comes slightly earlier)
++		if (m_hd_always || machine().render().is_live(*m_hdscreen))
++			hd_compose(m_hd_bitmap);
++	}
++}
++
++uint32_t harddriv_state::hd_screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect)
++{
++	copybitmap(bitmap, m_hd_bitmap, 0, 0, 0, 0, cliprect);
++	return 0;
++}
++
++void harddriv_state::hd_compose(bitmap_rgb32 &bitmap)
++{
++	static double t_sum[3]; static int t_n;
++	const bool dbg = std::getenv("STUN60_HDDEBUG") != nullptr;
++	auto t0 = std::chrono::steady_clock::now();
++	const int SX = m_hd_sx, SY = m_hd_sy;
++	const int W = std::min(m_hd_w, bitmap.width() / SX), H = std::min(m_hd_h, bitmap.height() / SY);
++	const int PLAY = std::min(208, H);          // 3D playfield rows (the HUD is below)
++	const int bank = m_gfx_palettebank * 256;
++	const s60hd_list *list = m_hd_done_list.get();
++	auto shadow_on = [] (int x, int y) { return (x & 3) == ((y & 1) ? 2 : 0); };
++
++	// 1. expected pen per low-res pixel: the polygons rasterized exactly like the GSP does
++	m_hd_exp.assign(W * H, -1);
++	if (list)
++		for (const s60hd_poly &p : list->polys)
++		{
++			const bool shadow = ((p.flags >> 10) & 3) == 2;
++			for (size_t i = 0; i < p.l.size(); i++)
++			{
++				const int y = p.y0 + int(i), r = y - 0x28;
++				if (r < 0 || r >= PLAY) continue;
++				const int a = std::max<int64_t>(p.l[i] >> 32, 0), b = std::min<int64_t>(p.r[i] >> 32, W - 1);
++				for (int x = a; x <= b; x++)
++					if (!shadow || shadow_on(x, y))
++						m_hd_exp[r * W + x] = p.pen;
++			}
++		}
++
++	// 2. classify, then fill the HD bitmap with the low-res image scaled up
++	const rgb_t *pens = m_palette->palette()->entry_list_adjusted();   // colours (pens() would give indices)
++	const int npens = m_palette->entries();
++	auto pc = [pens, npens] (int v) -> uint32_t { return uint32_t(pens[v < npens ? v : 0]) | 0xff000000; };
++	m_hd_cls.assign(W * H, 0);
++	for (int r = 0; r < H; r++)
++	{
++		const uint16_t *src = &m_hd_done[r * 512];
++		uint8_t *cls = &m_hd_cls[r * W];
++		const int16_t *exp = &m_hd_exp[r * W];
++		for (int x = 0; x < W; x++)
++			if (exp[x] >= 0)
++				cls[x] = ((src[x] & 0xff) == exp[x]) ? 1 : 2;
++		uint32_t *d0 = &bitmap.pix(r * SY);
++		for (int x = 0; x < W; x++)
++		{
++			uint32_t c = pc(src[x]);
++			if (cls[x] == 1)
++			{
++				// under a 3D pixel the background is unknown: borrow the nearest non-3D pixel in this row
++				// (only visible where an HD polygon edge leaves part of the low-res pixel uncovered)
++				c = 0xff000000;
++				for (int d = 1; d <= 8; d++)
++				{
++					if (x - d >= 0 && cls[x - d] == 0) { c = pc(src[x - d]); break; }
++					if (x + d < W && cls[x + d] == 0) { c = pc(src[x + d]); break; }
++				}
++			}
++			uint32_t *d = d0 + x * SX;
++			for (int xx = 0; xx < SX; xx++)
++				d[xx] = c;
++		}
++		for (int yy = 1; yy < SY; yy++)
++			std::memcpy(&bitmap.pix(r * SY + yy), d0, W * SX * sizeof(uint32_t));
++	}
++
++	auto t1 = std::chrono::steady_clock::now();
++	if (std::getenv("STUN60_HDDEBUG") && (m_hd_frames % 300) == 0)
++	{
++		int c[3] = { 0, 0, 0 };
++		for (int i = 0; i < W * PLAY; i++) c[m_hd_cls[i]]++;
++		std::fprintf(stderr, "stun60 HD: frame %u lists %u polys %d playfield px: bg %d 3d %d over %d\n",
++				m_hd_frames, m_hd_lists, list ? int(list->polys.size()) : -1, c[0], c[1], c[2]);
++	}
++
++	// 3. the polygons at full resolution, in list order (later ones on top)
++	if (list)
++	{
++		const int HW = W * SX;
++		// rows with no "drawn over" pixel take a plain span fill (almost all of them)
++		std::vector<uint8_t> row_over(PLAY, 0);
++		for (int r = 0; r < PLAY; r++)
++			for (int x = 0; x < W; x++)
++				if (m_hd_cls[r * W + x] == 2) { row_over[r] = 1; break; }
++		for (const s60hd_poly &p : list->polys)
++		{
++			const bool shadow = ((p.flags >> 10) & 3) == 2;
++			const uint32_t col = pc(bank + p.pen);
++			const int n = int(p.l.size());
++			const int r0 = std::max(p.y0 - 0x28, 0), r1 = std::min(p.y0 + n - 1 - 0x28, PLAY - 1);
++			for (int r = r0; r <= r1; r++)
++				for (int yy = 0; yy < SY; yy++)
++				{
++					const int Y = r * SY + yy;
++					// edge positions at this HD row: lines are sampled at row centres, interpolate between them
++					const double u = (Y + 0.5) / SY + 0x28 - 0.5 - p.y0;
++					double L, R;
++					if (n == 1) { L = double(p.l[0]); R = double(p.r[0]); }
++					else
++					{
++						int i = int(std::floor(u));
++						i = std::clamp(i, 0, n - 2);
++						const double f = u - i;
++						L = p.l[i] + (double(p.l[i + 1]) - double(p.l[i])) * f;
++						R = p.r[i] + (double(p.r[i + 1]) - double(p.r[i])) * f;
++						// in the half line beyond the first/last line the span may only narrow (sharper
++						// apexes), never widen (near-horizontal edges would grow long needles)
++						if (u < 0) { L = std::max(L, double(p.l[0])); R = std::min(R, double(p.r[0])); }
++						else if (u > n - 1) { L = std::max(L, double(p.l[n - 1])); R = std::min(R, double(p.r[n - 1])); }
++					}
++					const double xl = L / 4294967296.0 - 0.5, xr1 = R / 4294967296.0 + 0.5;
++					int X0 = int(std::ceil(xl * SX - 0.5)), X1 = int(std::ceil(xr1 * SX - 0.5)) - 1;   // centre in [xl, xr1)
++					X0 = std::max(X0, 0);
++					X1 = std::min(X1, HW - 1);
++					uint32_t *d = &bitmap.pix(Y);
++					if (X1 < X0) continue;
++					if (!shadow && !row_over[r]) { std::fill(d + X0, d + X1 + 1, col); continue; }
++					const uint8_t *cls = &m_hd_cls[r * W];
++					for (int X = X0; X <= X1; X++)
++					{
++						if (cls[X / SX] == 2) continue;       // something was drawn over the 3D scene here
++						if (shadow)
++						{
++							const rgb_t o(d[X]);
++							d[X] = rgb_t(0xff, o.r() * 7 / 10, o.g() * 7 / 10, o.b() * 7 / 10);
++						}
++						else
++							d[X] = col;
++					}
++				}
++		}
++	}
++	if (dbg)
++	{
++		auto t2 = std::chrono::steady_clock::now();
++		t_sum[0] += std::chrono::duration<double, std::milli>(t1 - t0).count();
++		t_sum[1] += std::chrono::duration<double, std::milli>(t2 - t1).count();
++		if (++t_n == 600)
++		{
++			std::fprintf(stderr, "stun60 HD timing: classify+scale %.2f ms, polygons %.2f ms per frame\n", t_sum[0] / t_n, t_sum[1] / t_n);
++			t_sum[0] = t_sum[1] = 0; t_n = 0;
++		}
++	}
++}
 --- a/src/frontend/mame/luaengine.cpp
 +++ b/src/frontend/mame/luaengine.cpp
 @@ -15,6 +15,9 @@

@@ -21,6 +21,36 @@ low" warning fixed; portable packages rebuilt (Linux glibc >= 2.36, Windows 10/1
   finished + packaged ~2 days.
 - Backburner: choppy sound on the user's real Windows PC (later check seemed OK); "extra 1 missed (rendered true)" ~0.25/s.
 
+## HD redraw, stage 1 DONE (2026-11-18, late): working prototype, local commits only (user: push after review)
+- Custom build: STUN60_HD="SXxSY" (default in run-stun60.sh: 3x5 = 1536x1200; empty = off, identical to before) adds a second
+  screen ":mainpcb:hdscreen" (rgb32). Code in harddriv_v.cpp (hd_config/hd_start/hd_parse_list/hd_capture_line/hd_compose),
+  members in harddriv.h; patch now covers harddriv_v.cpp too (stun60-mame0285.patch; .orig kept).
+  - Which list is on screen: GSP write tap FFF71680 (nonzero = draw done: list address at FFF77F30 lo / FFF77F40 hi, i.e.
+    mailbox+0x10; parse it -> pending), FFF71680 <- 0 at the vblank flip -> shown. Each low-res frame is captured in
+    scanline_multisync (row 0 latches the shown list; bottom row completes the frame and composes HD right then).
+  - 3D block = first 0x7000 word in the list whose offset table validates (FFFF-terminated, offsets < count). Polys parsed
+    like dec.py (32.32 accumulators, frac .5); flags bit15 skip, bit12 alt handler skipped (left to the low-res image).
+  - Compose: rasterize polys at low res exactly like the GSP -> expected pen per pixel; classify each playfield pixel
+    3D (frame pen == expected), "over" (something drawn on top: keep low-res), bg. Scale the low-res frame up SXxSY
+    (3D pixels get the nearest non-3D row neighbour as background), then draw polys at HD in list order: edges interpolated
+    between line samples (lines sampled at row centres), half-line ends may only narrow (no needles), half-open fill rule
+    [xl, xr+1), shadow mode 2 = 30% darken instead of 1-in-4 dither. Skipped where a low-res pixel is "over". Rows 0-207 only.
+  - Colours: palette()->entry_list_adjusted() (NOT pens(): those are indices -> blue garbage). Force alpha 0xff.
+  - Cost on the Ryzen: ~1 ms classify+scale + 0.6-1.5 ms polygons per frame; headless speed 310% -> ~210%. Composed only
+    while the HD screen is in view (render().is_live) unless STUN60_HDALWAYS/STUN60_HDDEBUG (tests; debug prints class
+    counts + timing every 300/600 frames). Classification: 99.5% of polygon pixels match (the rest = genuine overlays).
+  - Main screen gets VIDEO_ALWAYS_UPDATE when HD is on (it isn't "live" in the HD view but we need its scanlines).
+- Script (prev .v4g): H toggles HD/original by switching render.ui_target view ("Screen 1 Standard (4:3)" / "Screen 0 ...");
+  remembered in stun60-hd.txt (default on); overlay/messages drawn on the screen in view (dbox/dtext scale by SX,SY).
+  The C key (CRT chain) works in the HD view too ("Window 0, Screen 0 Effect" = first screen of the current view).
+- Tests: verify 3553/3553 exact to level 4 with HD in view (58.5 fps, 19.96 ticks); HD off = unchanged (677 exact, 60.0 fps).
+  Display alignment: HD view frame N == original view frame N (no lag). Measure with MAME snapshots of single-screen views
+  (-snapview "Screen N Standard (4:3)", two deterministic runs); screen:pixels() reads a swapped buffer (looks 1 frame off),
+  and headless snapshots of the 2-screen views show the HD screen black (not a real problem).
+- Comparison images for the user: ~/mame/hd-experiment/live-hd/ (compare-frameNNNNN.png side by side, zoom-*, hd-*).
+- Next: user reviews the images + plays live (H toggles, C = CRT on top of HD). Ideas: anti-aliasing (2x2 supersampling of
+  edges), 16:9 widescreen probe, packaging (HD in AppImage/Windows), cheaper compose for slower CPUs (threads).
+
 ## Current state (CachyOS, 2026-11-18)
 - **Setup DONE 2026-11-18:** ~/mame/build/mame-mame0285/stun60 built in ~5 min (-j16). Verify test: 60.0 fps, 20.00 ticks/s,
   677/677 exact. Launcher stunrun-60fps-custom.desktop in ~/.local/share/applications + ~/Desktop (-> run-stun60.sh).

@@ -518,6 +518,28 @@ local key_was = false
 local key_c = inp:code_from_token("KEYCODE_C")
 local keyc_was = false
 local CRT_SLIDER = "Window 0, Screen 0 Effect"
+-- H toggles the HD redraw (custom build started with STUN60_HD: a second screen with the 3D scene redrawn at
+-- 3x5 the resolution); the choice is remembered. The overlay is drawn on whichever screen is in view.
+local HDF = DATA and (DATA .. "/stun60-hd.txt") or (HOMED .. "/.mame/stun60-hd.txt")
+local hdscr = mach.screens[":mainpcb:hdscreen"]
+local key_h = inp:code_from_token("KEYCODE_H")
+local keyh_was = false
+local hd_on = hdscr ~= nil
+do local f = io.open(HDF, "r"); if f then local v = f:read("l"); f:close(); if v == "off" then hd_on = false end end end
+local hd_sx, hd_sy = 3, 5
+do local a, b = (os.getenv("STUN60_HD") or ""):match("^(%d+)x(%d+)$"); if a then hd_sx, hd_sy = tonumber(a), tonumber(b) end end
+local dscr, kx, ky = scr, 1, 1   -- screen the overlay is drawn on, and the scale from 512x240 coordinates
+local hd_applied = nil
+local function apply_hd()
+  if not hdscr then return end
+  local t = mach.render.ui_target
+  local want = hd_on and "Screen 1 Standard (4:3)" or "Screen 0 Standard (4:3)"
+  if t then for i, n in ipairs(t.view_names) do if n == want then t.view_index = i end end end
+  if hd_on then dscr, kx, ky = hdscr, hd_sx, hd_sy else dscr, kx, ky = scr, 1, 1 end
+  hd_applied = hd_on
+end
+local function dbox(x1, y1, x2, y2, f, l) dscr:draw_box(x1 * kx, y1 * ky, x2 * kx, y2 * ky, f, l) end
+local function dtext(x, y, t, c) dscr:draw_text(x == "center" and "center" or x * kx, y * ky, t, c) end
 local CRT_ORDER = { {"crt-geom-deluxe", "CRT scanlines (deluxe)"}, {"crt-geom", "CRT scanlines (sharp)"}, {"default", "No screen effect"} }
 local crt_idx = nil          -- chain name -> slider value, filled on first use
 local crt_msg, crt_msg_until = nil, 0
@@ -572,24 +594,38 @@ function draw_overlay()
   local kc = inp:code_pressed(key_c)
   if kc and not keyc_was then crt_cycle() end
   keyc_was = kc
+  local kh = inp:code_pressed(key_h)
+  if kh and not keyh_was then
+    if hdscr then
+      hd_on = not hd_on
+      local f = io.open(HDF, "w"); if f then f:write(hd_on and "on" or "off", "\n"); f:close() end
+      crt_msg = hd_on and "HD redraw on" or "Original resolution"
+    else
+      crt_msg = "HD redraw not enabled (STUN60_HD)"
+    end
+    crt_msg_until = mach.time:as_double() + 2.5
+    L("hd: " .. tostring(hd_on))
+  end
+  keyh_was = kh
+  if hd_applied ~= hd_on then apply_hd() end
   if crt_msg and mach.time:as_double() < crt_msg_until then
-    scr:draw_box(156, 4, 356, 18, 0xff000000, 0xff000000)   -- solid black box, top centre
-    scr:draw_text("center", 6, crt_msg, 0xffffffff)
+    dbox(156, 4, 356, 18, 0xff000000, 0xff000000)   -- solid black box, top centre
+    dtext("center", 6, crt_msg, 0xffffffff)
   end
   if ovmode == "full" then
-    scr:draw_box(2, 2, 150, 24, 0xc0000000, 0xffffff00)
-    scr:draw_text(5, 3, "Drawn FPS: " .. shown.gspf .. "  ticks: " .. shown.ticks, 0xff000000)
-    scr:draw_text(5, 13, "interp: " .. shown.extra .. "  dropped: " .. shown.drop ..
+    dbox(2, 2, 150, 24, 0xc0000000, 0xffffff00)
+    dtext(5, 3, "Drawn FPS: " .. shown.gspf .. "  ticks: " .. shown.ticks, 0xff000000)
+    dtext(5, 13, "interp: " .. shown.extra .. "  dropped: " .. shown.drop ..
       (errcount > 0 and ("  ERR " .. errcount) or ""), 0xff000000)
   elseif ovmode == "small" then
     local txt = shown.gspf .. (errcount > 0 and " ERR" or "")
-    scr:draw_box(2, 2, 22, 11, 0x80000000, 0x80000000)
-    scr:draw_text(4, 2, txt, 0xffffff00)
+    dbox(2, 2, 22, 11, 0x80000000, 0x80000000)
+    dtext(4, 2, txt, 0xffffff00)
   end
   if low_secs >= 3 then
-    scr:draw_box(56, 30, 456, 64, 0xe0000000, 0xffff4040)
-    scr:draw_text("center", 34, "Emulated ADSP too slow for 60 fps", 0xffff8080)
-    scr:draw_text("center", 46, "Raise adsp in STUN60_CLOCK (default maincpu=3,gsp=4,adsp=8)", 0xffffffff)
+    dbox(56, 30, 456, 64, 0xe0000000, 0xffff4040)
+    dtext("center", 34, "Emulated ADSP too slow for 60 fps", 0xffff8080)
+    dtext("center", 46, "Raise adsp in STUN60_CLOCK (default maincpu=3,gsp=4,adsp=8)", 0xffffffff)
   end
 end
 
