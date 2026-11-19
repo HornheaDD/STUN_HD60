@@ -15,17 +15,36 @@ of the scene, not blended or AI-generated frames.
 
 **HD redraw:** the patched driver reads the game's own polygon list (already projected to the screen by the game) and
 redraws every 3D polygon at 3x5 the resolution on a second screen, with the game's colours. Everything that is not 3D
-(skyline backgrounds, HUD, text) is taken from the original picture and scaled up. Upscaled backgrounds made from your own
-ROM are in progress.
+(HUD, text) is taken from the original picture and scaled up.
+
+**HD backgrounds:** the skyline panoramas behind the track (canyon, hills, plains, farmland, city, galaxy) are the game's own
+artwork, unpacked from your ROM and upscaled with the AI upscaler [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
+(`realesrgan-x4plus` model). No artwork is included in this repository or in the downloads: it is made on your PC from
+your own `stunrun.zip`.
+
+What happens on first launch:
+
+* The game starts **immediately**, at 60 fps with the HD 3D scene; the skylines show the original pixels at first.
+* In the background, at the lowest priority, the game unpacks the backgrounds from the ROM and upscales them (14 images).
+  Level 1's skyline comes first. Each skyline switches to HD on its own as soon as it is ready; no restart is needed.
+* On a gaming graphics card this takes about 15 seconds in total (level 1 after a few seconds), so it is done before you
+  have inserted a coin. A slower graphics card only means the original skylines stay a little longer.
+* The finished pack is saved in the game's data folder (about 40 MB), so later launches are HD from the start.
+* Real-ESRGAN needs a graphics card with Vulkan support. Without it, the game keeps the original skylines and notes this in
+  its log; nothing else changes.
+
+The colours follow the game's live palette, so fades still work, and anything drawn over a skyline (HUD, text) stays as in
+the original. The between-level city screens are not upscaled yet.
 
 Also included: an optional CRT look (MAME BGFX `crt-geom` shaders, toggled in-game with **C**), an on-screen
 statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
 
-**Planned:** upscaled skyline backgrounds built from your own ROM (in progress), and possibly a **widescreen (16:9) hack**:
+**Planned:** HD versions of the between-level city screens, and possibly a **widescreen (16:9) hack**:
 widening the game's 3D view so it fills modern screens, with the HUD kept centred. Not started yet; it depends on how far
 the game's own projection and clipping limits can be pushed without objects popping in at the edges.
 
-**Download:** HD builds will appear on the [Releases page](https://github.com/HornheaDD/STUN_HD60/releases).
+**Download:** HD builds will appear on the [Releases page](https://github.com/HornheaDD/STUN_HD60/releases) (not
+released yet; they will include Real-ESRGAN, about 45 MB).
 The 60 fps-only builds are on the [STUN60 Releases page](https://github.com/HornheaDD/STUN60/releases/latest).
 
 **No ROMs are included.** You need your own MAME 0.285 `stunrun.zip` (parent set).
@@ -52,6 +71,11 @@ cp /path/to/stunrun.zip roms/
 scripts/run-stun60.sh      # uses ~/mame/... paths: clone the repo to ~/mame, or edit the script
 ```
 
+For the HD backgrounds, unzip the official `realesrgan-ncnn-vulkan-20220424-ubuntu.zip` from the
+[Real-ESRGAN v0.2.5.0 release](https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0) into `build/tools/realesrgan/`
+(the launcher finds it there; `STUN60_ESRGAN` = path to the program, `STUN60_HDPACK` = pack folder, default `hdpack/pack`).
+`hdpack/build_pack.py` builds the same pack offline (reference implementation), `hdpack/stunbg.py` extracts the raw images.
+
 `./build.sh package` builds the portable variant used for the AppImage (see `package/`), and `./build.sh windows`
 cross-compiles `stun60.exe` with MinGW-w64.
 
@@ -66,6 +90,7 @@ Controls: MAME defaults (5 = coin, 1 = start, Tab = menu, Esc = quit), **O** = o
 | `scripts/stunrun-interp60.lua` | The 60 fps interpolation script (older versions kept as `.v*`) |
 | `scripts/run-stun60.sh` | Local launcher |
 | `scripts/re-probes/` | Reverse-engineering probes and headless test drivers (`live_test.lua` = scripted game + verify) |
+| `hdpack/` | Background extractor and offline pack builder (the game builds the pack itself on first launch) |
 | `hd-experiment/` | Offline HD redraw and interpolation experiments (tools, images, videos) |
 | `package/` | AppImage and Windows launcher sources, glibc compatibility shim, end-user README |
 | `stun60-live-*.log` | Logs from live play sessions (per-second fps / tick / timing stats) |
@@ -79,4 +104,5 @@ Built on [MAME](https://www.mamedev.org/) 0.285. The MAME source files changed b
 (`harddriv*.cpp`, `harddriv.h`, `luaengine.cpp`, `chainmanager.*`) are BSD-3-Clause, and the patch keeps their license.
 Binaries built from it are MAME builds and fall under MAME's overall license (GPL-2.0-or-later).
 Everything else in this repository (scripts, tools, packaging) is under the MIT License, see `LICENSE`.
+Real-ESRGAN (realesrgan-ncnn-vulkan) is by Xintao Wang et al., BSD-3-Clause; it is run as a separate program.
 S.T.U.N. Runner is © 1989 Atari Games. This project is not affiliated with Atari or the MAME team.
