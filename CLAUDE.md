@@ -1,10 +1,26 @@
 # S.T.U.N. Runner 60fps: project notes for Claude
 
-These notes live in the public git repo https://github.com/HornheaDD/STUN60 (local clone ~/mame). Machine-specific and private details (NAS, network, delivery locations,
+These notes live in the public git repo https://github.com/HornheaDD/STUN_HD60 (remote `hd`, local clone ~/mame, main tracks hd/main;
+the older https://github.com/HornheaDD/STUN60 = 60 fps-only v1.0, frozen). Machine-specific and private details (NAS, network, delivery locations,
 backups) are in ~/CLAUDE.md on the user's PC and must NOT be copied here. Paths below assume the repo is ~/mame.
 Build tree (not in git): ~/mame/build/mame-mame0285 = MAME 0.285 source + stun60-mame0285.patch. ROMs (not in git): ~/mame/roms.
 
-## PAUSED HERE (2026-11-18, evening). Start with this section.
+## PAUSED HERE (2026-11-19, night). Start with this section.
+State: STUN_HD60 release **hd-v1.2** is Latest (60 fps + HD redraw 3x5 + HD backgrounds via Real-ESRGAN on first launch +
+HD wireframe lines + gate morph). Repo clean and in sync with hd/main; packages in package/out-hd/ (v1.0/v1.1 copies in
+out-hd-v1.0/, out-hd-v1.1/). Verify baseline: normal course 1792/1792 exact, 58.0 fps; Labyrinth 1216/1216, 57.25 fps.
+Untracked local-only files (keep out of git): hd-experiment/live-hd/Screenshot_*.png, gate-morph-compare.gif,
+wireframe-*-compare.png, wireframe-full-zoom.png.
+- Waiting on: the user's report from a real Windows PC (HD60 package on the NAS; only tested under Wine so far).
+- Not requested yet, candidate next work (ask the user which):
+  - Smooth other flipbook animations (explosions, 167..16B, E4/E5, DC/DD...) with the gate-morph approach (needs the
+    model topology per animation checked; see "Tunnel gates" below).
+  - HD for GSP flag-bit-12 polygons (alt handler FFF48FC0: scaled 2D sprites, e.g. the red arrow markings), still low-res.
+  - HD course map and title screens (README "Planned").
+  - Widescreen 16:9 probe (README "Planned"; not started).
+- Release recipe for HD60: see "HD packages built and RELEASED" and the hd-v1.1/hd-v1.2 notes at the end.
+
+## Earlier pause (2026-11-18, evening), history
 Done today on CachyOS: setup from the migration bundle + first live run (59.5 fps in 3D play); CRT scanlines via BGFX with the
 C key (custom Lua binding stun60_slider); attract-screen "dip" explained (static story panel, GSP-bound) + false "overclock too
 low" warning fixed; portable packages rebuilt (Linux glibc >= 2.36, Windows 10/11); project put on git/GitHub.
