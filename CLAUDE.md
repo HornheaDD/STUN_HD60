@@ -524,7 +524,7 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - Running several emulators at once starves the nice-19 builder (by design); kill stray test emulators (an orphan from the
   kwin test ran for 1.5 h).
 
-## HD packages built (2026-11-19), NOT released (user: release later in the day)
+## HD packages built and RELEASED (2026-11-19): GitHub release hd-v1.0 on STUN_HD60 (tag hd-v1.0; local v1.0 = STUN60's)
 - package/out-hd/: STUNRunnerHD60-x86_64.AppImage (52 MB), STUNRunnerHD60-linux-x86_64.tar.gz (54 MB, run -> AppRun
   symlink), STUNRunnerHD60-windows-x64.zip (50 MB; zipped with Python zipfile, no `zip` here). v1.0 files in package/out untouched.
 - Linux: package/STUNRunnerHD60.AppDir (copy of the v1 AppDir): stripped stun60 (glibc <= 2.36), Lua script, AppRun with

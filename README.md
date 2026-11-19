@@ -49,8 +49,8 @@ statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
   centred. Not started yet; it depends on how far the game's own projection and clipping limits can be pushed without
   objects popping in at the edges.
 
-**Download:** HD builds will appear on the [Releases page](https://github.com/HornheaDD/STUN_HD60/releases) (not
-released yet; they include Real-ESRGAN, about 50 MB).
+**Download:** [S.T.U.N. Runner HD60 v1.0](https://github.com/HornheaDD/STUN_HD60/releases/latest) for Windows x64 and
+Linux x86-64 (AppImage or tar.gz, about 50 MB each, Real-ESRGAN included).
 The 60 fps-only builds are on the [STUN60 Releases page](https://github.com/HornheaDD/STUN60/releases/latest).
 
 **No ROMs are included.** You need your own MAME 0.285 `stunrun.zip` (parent set).
