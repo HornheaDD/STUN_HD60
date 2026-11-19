@@ -447,9 +447,9 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
   goes in `~/mame/scripts/`.
 
 ## Repo move + red-screen fix (2026-11-18, late)
-- **Repos:** development continues in github.com/HornheaDD/STUN_HD60 (git remote `hd`, public, empty until first push).
+- **Repos:** development continues in github.com/HornheaDD/STUN_HD60 (git remote `hd`, public, pushed 2026-11-18; main tracks hd/main).
   STUN60 (`origin`) stays frozen as the 60 fps-only v1.0; it only gets a README pointer (branch `stun60-pointer`,
-  worktree ../stun60-pointer). Push to either only when the user says so.
+  pushed). Push only when the user says so. User confirmed the red-screen fix in a live game.
 - **Red picture after H (HD off) = MAME BGFX bug, fixed in the patch** (`src/osd/modules/render/bgfx/chainmanager.*`):
   chain_manager::update_screen_textures sets up a slot's converter ("XXconvert") and texture names once; the HD screen is
   RGB32 (format 2), the original PALETTE16 (format 1), so after a view switch the raw palette indices were shown (red).
