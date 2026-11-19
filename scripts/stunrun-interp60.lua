@@ -8,7 +8,8 @@
 -- Needs overclocking (Tab > Slider Controls, MAME started with -cheat): gsp, adsp and
 -- maincpu at about 400%. Without enough overclock the extra frames are dropped and the
 -- game falls back to its normal 20 fps pacing (never runs fast or slow because of this).
--- RAM/IO patching only, ROMs untouched. See ~/CLAUDE.md for how it works.
+-- RAM/IO patching; the only ROM change is the gate morph (blended gate models in unused SIM ROM space, see below).
+-- See CLAUDE.md for how it works.
 
 -- MAME re-runs the autoboot script after a machine reset; keep only the first instance.
 if STUN60_INSTANCE then return end
@@ -63,6 +64,207 @@ local function W68(a, d) self_write = true; ms:write_u16(a, d); self_write = fal
 local function WG(a, d)  self_write = true; gsp:write_u16(a, d); self_write = false end
 
 -- ---------------------------------------------------------------------------
+-- Gate morph: the iris gates at the tunnel mouths are a flipbook of 8 flat 3D models (ids CC..D3, one blade
+-- polygon per blade, 8 blades) that the game switches every second tick. For even motion every rendered frame
+-- (the real ones too) gets a gate "phase": the first tick of a stage shows half way from the previous stage,
+-- in-betweens interpolate. A blended model is built blade by blade (blades matched by colour and angle, outlines
+-- padded to the same corner count and aligned) and written into unused SIM ROM space; the model table entry of
+-- the id in the object slot points at it while the ADSP renders that job. Built at start from the ROM itself.
+-- SIM ROM ("user1"): word [id] = model address / 4. Model: nv, nv-1, 1, nv vertices (x, y, z; the last one is the
+-- face normal), a pointer to the face list, (face address, colour) pairs, 0 0, faces (normal index, 1-based
+-- vertex indices, FFFF). Addresses are 16-bit inside the model's 0x10000-word window.
+local GM = {on = os.getenv("STUN60_GATEMORPH") ~= "0", log = os.getenv("STUN60_GATELOG") == "1", FIRST = 0xCC, LAST = 0xD3, BUF = 0x25000, SLOT = 0x180}
+do
+  local R = mach.memory.regions[":mainpcb:user1"]
+  GM.R = R
+  local function rw(i) return R:read_u16(i * 2) end
+  local function sw(v) if v >= 0x8000 then return v - 0x10000 end return v end
+  local function model(id)
+    local a = rw(id) * 4
+    local nv = rw(a)
+    if nv < 4 or nv > 100 or rw(a + 1) ~= nv - 1 then return nil end
+    local v = {}
+    for i = 0, nv - 1 do
+      v[i + 1] = {sw(rw(a + 3 + 3*i)), sw(rw(a + 4 + 3*i)), sw(rw(a + 5 + 3*i))}
+      if i < nv - 1 and v[i + 1][3] ~= 0 then return nil end          -- flat models only
+    end
+    local base = a & ~0xFFFF
+    local q, faces = base + rw(a + 3 + 3*nv), {}
+    while rw(q) ~= 0 and #faces < 16 do
+      local fp, col = rw(q), rw(q + 1); q = q + 2
+      local r, pts = base + fp + 1, {}
+      while rw(r) ~= 0xFFFF and #pts < 12 do local vv = v[rw(r)]; if not vv then return nil end; pts[#pts+1] = {vv[1], vv[2]}; r = r + 1 end
+      faces[#faces+1] = {col = col, pts = pts}
+    end
+    return faces
+  end
+  local CY = 1561
+  local function ang(p) local x, y = 0, 0; for _,q in ipairs(p) do x = x + q[1]; y = y + q[2] end; return math.atan(y / #p - CY, x / #p) end
+  local function area(p) local s = 0; for i = 1, #p do local a, b = p[i], p[i % #p + 1]; s = s + a[1]*b[2] - b[1]*a[2] end; return s end
+  -- every way to add n2 - #P points on the edges of P (evenly spaced on an edge)
+  local function pads(P, N)
+    local out, n = {}, #P
+    local function rec(i, left, cnt)
+      if i > n then
+        if left == 0 then
+          local o = {}
+          for k = 1, n do
+            local a, b = P[k], P[k % n + 1]; o[#o+1] = a
+            for j = 1, cnt[k] do local t = j / (cnt[k] + 1); o[#o+1] = {a[1] + (b[1]-a[1])*t, a[2] + (b[2]-a[2])*t} end
+          end
+          out[#out+1] = o
+        end
+        return
+      end
+      for c = 0, left do cnt[i] = c; rec(i + 1, left - c, cnt) end
+    end
+    rec(1, N - n, {})
+    return out
+  end
+  local function align(P, Q)
+    local N = math.max(#P, #Q)
+    if (area(P) > 0) ~= (area(Q) > 0) then local r = {}; for i = #Q, 1, -1 do r[#r+1] = Q[i] end; Q = r end
+    local best, bp, bq = nil
+    for _,Pp in ipairs(pads(P, N)) do
+      for _,Qp in ipairs(pads(Q, N)) do
+        for r = 0, N - 1 do
+          local c = 0
+          for i = 1, N do local a, b = Pp[i], Qp[(i - 1 + r) % N + 1]; c = c + (a[1]-b[1])^2 + (a[2]-b[2])^2 end
+          if not best or c < best then
+            best, bp = c, Pp
+            bq = {}; for i = 1, N do bq[i] = Qp[(i - 1 + r) % N + 1] end
+          end
+        end
+      end
+    end
+    return bp, bq
+  end
+  local function match(A, B)
+    local As, Bs = {}, {}
+    for _,f in ipairs(A) do As[#As+1] = f end; for _,f in ipairs(B) do Bs[#Bs+1] = f end
+    table.sort(As, function(x, y) return ang(x.pts) < ang(y.pts) end)
+    table.sort(Bs, function(x, y) return ang(x.pts) < ang(y.pts) end)
+    local best, bs = nil, 0
+    for sft = 0, #Bs - 1 do
+      local c = 0
+      for i, f in ipairs(As) do
+        local g = Bs[(i - 1 + sft) % #Bs + 1]
+        local d = math.abs((ang(f.pts) - ang(g.pts) + math.pi) % (2 * math.pi) - math.pi)
+        c = c + d + ((g.col ~= f.col) and 100 or 0)
+      end
+      if not best or c < best then best, bs = c, sft end
+    end
+    local pairs_ = {}
+    for i, f in ipairs(As) do
+      local g = Bs[(i - 1 + bs) % #Bs + 1]
+      local P, Q = align(f.pts, g.pts)
+      pairs_[#pairs_+1] = {col = f.col, P = P, Q = Q}
+    end
+    return pairs_
+  end
+  if GM.on then
+    local ok = true
+    GM.orig, GM.cur, GM.key, GM.pairs = {}, {}, {}, {}
+    for id = GM.FIRST, GM.LAST do GM.orig[id] = rw(id); GM.cur[id] = GM.orig[id] end
+    local models = {}
+    for id = GM.FIRST, GM.LAST do models[id] = model(id); if not models[id] or #models[id] ~= 8 then ok = false end end
+    for i = GM.BUF, GM.BUF + GM.SLOT * 8 - 1 do if rw(i) ~= 0 then ok = false; break end end
+    if ok then for id = GM.FIRST, GM.LAST - 1 do GM.pairs[id] = match(models[id], models[id + 1]) end end
+    GM.on = ok
+  end
+end
+L("gate morph " .. (GM.on and "on" or "off (STUN60_GATEMORPH=0 or unexpected ROM data)"))
+-- write the blend of stage lo -> lo+1 at fraction f into buffer slot s (word address returned)
+local function gm_write(s, lo, f)
+  local B = GM.BUF + GM.SLOT * s
+  local w, verts, faces = {}, {}, {}
+  for _,pr in ipairs(GM.pairs[lo]) do
+    local idx = {}
+    for i = 1, #pr.P do
+      local a, b = pr.P[i], pr.Q[i]
+      verts[#verts+1] = {math.floor(a[1] + (b[1]-a[1])*f + 0.5), math.floor(a[2] + (b[2]-a[2])*f + 0.5)}
+      idx[#idx+1] = #verts
+    end
+    faces[#faces+1] = {col = pr.col, idx = idx}
+  end
+  local nv = #verts + 1
+  w[1], w[2], w[3] = nv, nv - 1, 1
+  for _,v in ipairs(verts) do w[#w+1] = v[1] & 0xFFFF; w[#w+1] = v[2] & 0xFFFF; w[#w+1] = 0 end
+  w[#w+1] = 0; w[#w+1] = 0; w[#w+1] = 0xC000                   -- normal (0, 0, -16384)
+  local L0 = B + #w + 1                                         -- face list right after its pointer
+  w[#w+1] = L0 & 0xFFFF
+  local F = L0 + 2 * #faces + 2
+  for _,fc in ipairs(faces) do w[#w+1] = F & 0xFFFF; w[#w+1] = fc.col; F = F + #fc.idx + 2 end
+  w[#w+1] = 0; w[#w+1] = 0
+  for _,fc in ipairs(faces) do
+    w[#w+1] = nv
+    for _,i in ipairs(fc.idx) do w[#w+1] = i end
+    w[#w+1] = 0xFFFF
+  end
+  for i, v in ipairs(w) do GM.R:write_u16((B + i - 1) * 2, v) end
+  return B
+end
+-- point each gate id at the model for its phase (map: id -> phase, e.g. 0xCD - 0.5); ids not in map: original
+local function gm_apply(map)
+  if not GM.on then return end
+  for id = GM.FIRST, GM.LAST do
+    local ph, ptr, key = map and map[id], GM.orig[id], nil
+    if ph then
+      local lo = math.floor(ph + 1e-6)
+      local f = ph - lo
+      if lo < GM.FIRST then lo, f = GM.FIRST, 0 end
+      if lo >= GM.LAST then lo, f = GM.LAST, 0 end
+      if f < 0.01 then ptr = GM.orig[lo]
+      else
+        key = lo * 1000 + math.floor(f * 1000 + 0.5)
+        if GM.key[id] ~= key then gm_write(id - GM.FIRST, lo, f); GM.key[id] = key end
+        ptr = (GM.BUF + GM.SLOT * (id - GM.FIRST)) // 4
+      end
+    end
+    if GM.cur[id] ~= ptr then GM.R:write_u16(id * 2, ptr); GM.cur[id] = ptr end
+  end
+end
+-- per 68010 object: its gate id and since which job (the game steps the gate every second tick)
+local gm_track = {}
+local function gm_isgate(id) return id and id >= GM.FIRST and id <= GM.LAST end
+local function gm_on_job(J, jc)
+  if not GM.on then return end
+  for obj, id in pairs(J.ids or {}) do
+    local t = gm_track[obj]
+    if not t then gm_track[obj] = {id = id, since = jc, last = jc, half = false}
+    else
+      if id ~= t.id then
+        t.half = gm_isgate(id) and id == t.id + 1 and (jc - t.since) >= 2
+        if GM.log and (gm_isgate(id) or gm_isgate(t.id)) then
+          L(string.format("gate %08X: %X -> %X after %d jobs%s", obj, t.id, id, jc - t.since, t.half and " (half step)" or ""))
+        end
+        t.id, t.since = id, jc
+      end
+      t.last = jc
+    end
+  end
+  local ph = {}
+  for obj, t in pairs(gm_track) do
+    if jc - t.last > 50 then gm_track[obj] = nil
+    elseif gm_isgate(t.id) and jc - t.last <= 3 then
+      ph[obj] = {id = t.id, ph = (t.half and jc == t.since) and (t.id - 0.5) or t.id}
+    end
+  end
+  J.gph = ph
+end
+local function gm_map(A, B, t)
+  if not (A and A.gph) then return nil end
+  local map = {}
+  for obj, a in pairs(A.gph) do
+    local b = B and B.gph and B.gph[obj]
+    local p = a.ph
+    if b and math.abs(b.ph - a.ph) <= 1.01 then p = a.ph + (b.ph - a.ph) * t end
+    map[a.id] = p
+  end
+  return map
+end
+
+-- ---------------------------------------------------------------------------
 -- recording the 68010's ADSP job uploads
 local function on_ctl(o, d)
   if self_write then return end
@@ -73,7 +275,9 @@ local function on_ctl(o, d)
     rec = {slot = recseq % 14}                  -- ADSP memory as it was before this job (custom MAME slot)
     CMD(1, rec.slot)
   elseif o == 0x81801A and rec and MPC.value ~= 0x02E464 and MPC.value ~= 0x02E414 then
-    jobs[#jobs+1] = rec; rec = nil; jobcount = jobcount + 1
+    jobs[#jobs+1] = rec; jobcount = jobcount + 1
+    gm_on_job(rec, jobcount); gm_apply(gm_map(rec, nil, 0))      -- the ADSP renders this job next: its gate phase
+    rec = nil
     if DBG then L(string.format("68010 job %d uploaded (%d writes)", jobcount, #jobs[#jobs])) end
     if #jobs > 8 then table.remove(jobs, 1) end
   end
@@ -81,6 +285,7 @@ end
 local function on_data(o, d)
   if self_write or not rec then return end
   local pc = MPC.value
+  if pc == 0x02E22C or pc == 0x02E360 then rec.ids = rec.ids or {}; rec.ids[MA2.value] = d & 0xffff end   -- object model id
   if (POS[pc] or MAT[pc]) and not (o >= 0x80BFC8 and o <= 0x80BFFC) then
     rec[#rec+1] = {o, d & 0xffff, pc, MA2.value}     -- object field: remember which 68010 object
   else
@@ -313,6 +518,7 @@ local function step(c)
           -- restore the ADSP state from before job A, upload the lerped job, release
           start_job_1()
           CMD(2, c.A.slot)
+          gm_apply(gm_map(c.A, c.Bj, c.tlist[c.idx]))
           start_job_2(lerp_job(c.A, c.Bj, c.tlist[c.idx]))
           c.bank_moved = true
           skipped_cycles = 0
@@ -644,6 +850,7 @@ local installed, nfr = false, 0
 STUN60_RESET_SUB = emu.add_machine_reset_notifier(function()
   cycle = nil; job_running = false; job_done = false; rec = nil; jobs = {}; cap_target = 3
   pending = nil; gsp_polling = false
+  gm_track = {}; gm_apply(nil)
   L("machine reset")
 end)
 -- host timing: wall time per emulated second, longest gap between frames, frames > 25 ms apart

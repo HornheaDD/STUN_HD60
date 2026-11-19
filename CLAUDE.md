@@ -568,3 +568,35 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
   out-hd/STUNRunnerHD60-windows/bin, AppImage via tools/appimagetool (--appimage-extract-and-run --no-appstream), tar.gz =
   AppDir copy + README.txt + run -> AppRun, zip via Python zipfile (README CRLF). v1.0 files moved to package/out-hd-v1.0/.
   Tests: package binary verify 1792/1792, 58.0 fps; AppImage new user 27 images in 23.5 s; Wine 60 fps / 20 ticks.
+
+## Tunnel gates (iris) are flipbook models (2026-11-19): gate morph DONE in the script (local commit)
+- Probe scripts/re-probes/gate/jobrec.lua (AY=255 F0 F1 OUT): logs every 68010 -> ADSP upload write (addr, value, PC, A2).
+  Labyrinth (Advanced, L11) gate ~frames 4170-4260 (orange/black iris at the tunnel mouth).
+- Object slot ids (PC 02E22C/02E236 new slot, 02E360/02E36E update) for the gate object (A2 FFA5F2 in that run) step
+  CC,CD,CE,CF,D0,D1,D2,D3 about every 8 frames (~7.5 Hz): 8 pre-built models swapped, no parameter to lerp. lerp_job keeps
+  job A's ids, so in-betweens repeat the model. Same scheme for other animated objects (167..16B, E4/E5, DC/DD...).
+- **Feasibility done (2026-11-19):** probe re-probes/gate/simrec.lua logs ADSP SIM streams (SIMCLK = ADSP data 0x2001,
+  MP = 0x2007 -> base 0x10000*MP, SIMBUF reads 0x2000; env SEQ=1 logs every word). SIM ROM = region ":mainpcb:user1"
+  (0x30000 words). Model table: word user1[id] = model address / 4. Model: nv, nv-1, 1, then nv vertices (x, y, z) (the
+  last one = face normal (0,0,-16384)); then a face list: one word, then (face address (16-bit, in base-1 window), colour)
+  pairs, 0000 0000; each face = 1-based vertex indices after a first word (= normal index), FFFF-terminated.
+  Gate iris CC..D3 @1A1C8..1A6E8: flat (z=0), 8 blades (5-6 corners each), nv 29,36,36,37,36,36,35,30: corner counts
+  and face order differ per stage -> no plain vertex lerp; morph per blade (match blades by colour + angle, resample the
+  outlines to a common corner count). Free space: user1 0x24D81, 45695 zero words (window base 2), enough for blended
+  models (write the blend there, point table[id] at it for the in-between job only, restore after).
+  Cadence: the model steps every 2 game ticks; real frames show stage X twice, so in-between-only morphing moves 3
+  frames then pauses 3. Even motion needs the real frames' model blended too (display only, game logic unaffected).
+- Smoothing would need a vertex morph: decode the model format in ADSP memory (geometry streamed from the "SIM" user1
+  ROM), check consecutive frames share topology, and for the in-between jobs write blended vertices into a spare model.
+- **Gate morph implemented (stunrun-interp60.lua "Gate morph" block; v5 = previous script):** at start it reads models
+  CC..D3 from user1 (disabled if the data doesn't look as expected or the buffer area 0x25000+ isn't zero), matches
+  blades per adjacent pair (colour + centroid angle, best cyclic shift), pads outlines to equal corner counts (edge
+  midpoints, all combinations) and aligns them (best rotation, same winding). Per recorded job (on_ctl release) it tracks
+  each 68010 object's model id (PCs 02E22C/02E360, A2) and sets its phase: first job of a stage = id - 0.5 when the
+  previous stage lasted >= 2 jobs, else id. gm_apply writes blended models (8 slots of 0x180 words at 0x25000, window
+  base 2, table ptr = addr/4) and points table[id] at them, else restores the original pointer. Real jobs: patched at
+  the release write; extras: before start_job_2 with phase lerped A->B (|dphase| <= 1). Reset restores the table.
+  Env STUN60_GATEMORPH=0 off, STUN60_GATELOG=1 logs stage changes. Must be defined before on_ctl (Lua locals).
+- Tests: Labyrinth (re-probes/gate/gate_test.lua, AY=255): gates at ~frame 1133 (level start) and ~2267, cadence
+  exactly 2 jobs, verify 1216/1216 exact, 57.25 fps morph on = off; normal verify 1792/1792, 58.0 fps.
+  Comparison (3x slow motion): hd-experiment/live-hd/gate-morph-compare.gif (local, not committed).

@@ -11,7 +11,8 @@ release. Everything from STUN60 is included here; press **H** in-game to switch 
 drawn frame, so simply unlocking the frame cap makes the whole game run three times too fast. This project keeps the game
 logic at its native 20 ticks per second and asks the game's **own 3D hardware** (the ADSP-2100 math board) to render two
 extra in-between frames per tick, with the camera and moving objects interpolated. The in-between images are real renders
-of the scene, not blended or AI-generated frames.
+of the scene, not blended or AI-generated frames. The iris gates at the tunnel mouths, which the original animates as a flipbook of 8 models
+(about 7 steps a second), are morphed blade by blade so they open smoothly too (`STUN60_GATEMORPH=0` turns this off).
 
 **HD redraw:** the patched driver reads the game's own polygon list (already projected to the screen by the game) and
 redraws every 3D polygon at 3x5 the resolution on a second screen, with the game's colours. The wireframe the vehicle turns into on a
