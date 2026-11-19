@@ -5,8 +5,9 @@ Atari's S.T.U.N. Runner (1989) at 60 frames per second and the correct game spee
 This is a custom build of MAME 0.285 (only the S.T.U.N. Runner driver) plus a Lua script.
 The game's own 3D chip renders two extra in-between frames per game tick, with the camera
 and objects interpolated, so the motion is real 60 fps (not blended frames).
-The 3D scene is redrawn in high resolution (1536x1200) from the game's own polygon data, and the
-skyline backgrounds are the game's own artwork upscaled with an AI upscaler (see below).
+The 3D scene is redrawn in high resolution (1536x1200) from the game's own polygon data (including
+the wireframe the craft turns into on a boost and the all-wireframe sections), and the skyline
+backgrounds are the game's own artwork upscaled with an AI upscaler (see below).
 H switches between the HD picture and the original 512x240 one at any time.
 Optional CRT look (scanlines, shadow mask, glow) via MAME's BGFX shaders.
 
@@ -59,7 +60,9 @@ Controls and tips
   - Level-change and attract-mode text screens stay at 20 fps (nothing 3D to interpolate there).
   - It needs a reasonably fast CPU: roughly an Intel 8th-gen quad-core laptop chip or better.
     The HD redraw adds about 2-3 ms of CPU time per frame while the HD picture is shown.
-  - The full-screen course map between levels is not upscaled yet (original pixels, scaled).
+  - The full-screen course map between levels and a few flat 2D objects on the track (such as the
+    red arrow markings) are not upscaled yet (original pixels, scaled).
+  - STUN60_HDLINE sets the width of the HD wireframe lines in HD pixels (default 2).
   - stun60.log in the data folder shows per-second stats (drawn fps, game ticks, timing).
 
 Credits

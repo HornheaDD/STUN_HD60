@@ -30,5 +30,6 @@ scripts/re-probes/wf/out/
 hdpack/samples/
 hdpack/pack*/
 package/out-hd/
+package/out-hd-v1.0/
 package/STUNRunnerHD60.AppDir/usr/
 package/win/STUNRunnerHD60.exe

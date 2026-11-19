@@ -564,3 +564,7 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - Tests: verify 1792/1792 exact to frame 6600, 58.0 fps (identical to the released hd-v1.0 binary). HD compose cost with
   everything wireframe (forced) ~2.5 ms/frame vs ~0.8 normal. Comparisons: hd-experiment/live-hd/wireframe-*.png.
 - Not done: bit 12 polys (alt handler FFF48FC0, scaled 2D sprites such as the red arrow decals) are still low-res.
+- **Released as hd-v1.1 (2026-11-19)** on STUN_HD60: rebuilt with ./build.sh package + windows, stripped into the AppDir /
+  out-hd/STUNRunnerHD60-windows/bin, AppImage via tools/appimagetool (--appimage-extract-and-run --no-appstream), tar.gz =
+  AppDir copy + README.txt + run -> AppRun, zip via Python zipfile (README CRLF). v1.0 files moved to package/out-hd-v1.0/.
+  Tests: package binary verify 1792/1792, 58.0 fps; AppImage new user 27 images in 23.5 s; Wine 60 fps / 20 ticks.
