@@ -510,3 +510,16 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - run-stun60.sh: STUN60_HDPACK=~/mame/hdpack/pack, STUN60_ESRGAN=build/tools/realesrgan/... when present.
 - Packages (later): bundle realesrgan-ncnn-vulkan + models/realesrgan-x4plus.{bin,param} (~45 MB, BSD-3), set the two env
   vars in AppRun / launcher.c (pack in the user data folder).
+
+## HD backgrounds, step 4 DONE (2026-11-19): level-start screens, palette variants, model per image
+- ROM tables per level L (0-25): skyline image = byte $4CB1C[L], level-start screen = byte $4CB36[L] (found at 0322A0/B4,
+  $FF9578 = level), base palette = $47406[L]. Level-start screens (512x96, drawn at y=0x40: city, sunset city, pink base...)
+  use pens 0-239 from the base palette + 240-255 from the image palette. Same pixels appear with 2 palettes (stream pairs
+  4/5, 6/7 ... share one pointer) -> pack format S60BG03: 256-colour ref palette, several variants per pixel key; at runtime
+  the variant whose ref colours are closest to the live palette is drawn, then tinted live/ref per pen.
+- Night/dark images (>50% pixels with max channel < 48: s04, s06 night city, s23 galaxy) use realesr-animevideov3: the
+  general model erased the small window lights (comparison in scratch; user picked x4plus for daytime). Batches per model.
+- First launch: 27 images (incl. galaxy + other attract/ending images via a 3rd pass), level 1 after ~5 s, all in ~24 s,
+  75 MB. Verify 4012/4012, 58.7 fps. Not covered: header-less full-screen images (course map, title; streams 1-3, 24-28).
+- Running several emulators at once starves the nice-19 builder (by design); kill stray test emulators (an orphan from the
+  kwin test ran for 1.5 h).

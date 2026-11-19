@@ -191,7 +191,7 @@
  #include "machine/timer.h"
  
  #include "sound/dac.h"
-@@ -384,6 +386,53 @@
+@@ -384,6 +386,55 @@
  
  	required_region_ptr<uint16_t> m_sim_memory;
  	uint16_t                m_som_memory[0x8000/2]{};
@@ -209,8 +209,10 @@
 +	struct s60hd_blit { int16_t x, y; uint16_t flags; uint32_t addr; uint16_t w, h; uint32_t key; };
 +	struct s60hd_list { std::vector<s60hd_poly> polys; std::vector<s60hd_blit> blits; };
 +	// HD background pack (env STUN60_HDPACK = folder of .s60bg files made by hdpack/build_pack.py)
-+	struct s60hd_bg { uint16_t w, h; uint8_t ref[16][3]; std::vector<uint32_t> rgb; std::vector<uint8_t> pen; };
-+	std::unordered_map<uint32_t, s60hd_bg> m_hd_bgs;
++	// one upscaled image + the palette it was upscaled with (ref); the same pixels can come with several palettes
++	struct s60hd_bg { uint16_t w, h; uint8_t ref[256][3]; uint32_t palkey; std::vector<uint8_t> used; std::vector<uint32_t> rgb; std::vector<uint8_t> pen; };
++	std::unordered_map<uint32_t, std::vector<s60hd_bg>> m_hd_bgs;     // pixel key -> palette variants
++	void hd_add_bg(uint32_t key, s60hd_bg &&bg);
 +	std::vector<s60hd_blit> m_hd_blits_cur;          // op 8 blits of the list the GSP is drawing
 +	memory_passthrough_handler m_hd_optap;
 +	uint32_t                m_hd_bg_drawn = 0;
@@ -245,7 +247,7 @@
  	uint16_t *              m_adsp_pgm_memory_word = 0;
  
  	uint16_t *              m_ds3_sdata_memory = 0;
-@@ -676,7 +725,7 @@
+@@ -676,7 +727,7 @@
  protected:
  	virtual void device_add_mconfig(machine_config &config) override ATTR_COLD;
  	virtual void device_start() override ATTR_COLD;
@@ -295,7 +297,7 @@
  
  
  
-@@ -450,7 +465,797 @@
+@@ -450,7 +465,867 @@
  			color = vram_base[coloridx >> 1];
  		dest[x] = m_gfx_palettebank * 256 + color;
  	}
@@ -306,6 +308,24 @@
  		display_speedups();
  }
 +
++
++// stun60 HD: FNV-1a over the reference colours of the pens an image uses (identifies a palette variant)
++static uint32_t s60_palkey(const uint8_t (&ref)[256][3], const std::vector<uint8_t> &used)
++{
++	uint32_t h = 2166136261u;
++	for (uint8_t p : used)
++		for (int c = 0; c < 3; c++) h = (h ^ ref[p][c]) * 16777619u;
++	return h;
++}
++
++static std::vector<uint8_t> s60_used_pens(const std::vector<uint8_t> &pens)
++{
++	bool u[256] = { false };
++	for (uint8_t p : pens) u[p] = true;
++	std::vector<uint8_t> r;
++	for (int i = 0; i < 256; i++) if (u[i]) r.push_back(uint8_t(i));
++	return r;
++}
 +
 +/*************************************
 + *
@@ -418,21 +438,33 @@
 +			continue;
 +		std::ifstream f(e.path(), std::ios::binary);
 +		char magic[8]; uint32_t key; uint16_t w, h, sx, sy;
-+		if (!f.read(magic, 8) || std::memcmp(magic, "S60BG01", 8)) continue;
++		if (!f.read(magic, 8) || std::memcmp(magic, "S60BG03", 8)) continue;     // older packs are rebuilt
 +		f.read(reinterpret_cast<char *>(&key), 4); f.read(reinterpret_cast<char *>(&w), 2); f.read(reinterpret_cast<char *>(&h), 2);
 +		f.read(reinterpret_cast<char *>(&sx), 2); f.read(reinterpret_cast<char *>(&sy), 2);
 +		if (!f || sx != m_hd_sx || sy != m_hd_sy || !w || !h || w > 1024 || h > 512) continue;
 +		s60hd_bg bg;
 +		bg.w = w; bg.h = h;
-+		f.read(reinterpret_cast<char *>(bg.ref), 48);
++		f.read(reinterpret_cast<char *>(bg.ref), sizeof(bg.ref));
 +		const size_t n = size_t(w) * sx * h * sy;
 +		bg.rgb.resize(n); bg.pen.resize(n);
 +		f.read(reinterpret_cast<char *>(bg.rgb.data()), n * 4);
 +		f.read(reinterpret_cast<char *>(bg.pen.data()), n);
 +		if (!f) continue;
-+		m_hd_bgs[key] = std::move(bg);
++		hd_add_bg(key, std::move(bg));
 +	}
-+	std::fprintf(stderr, "stun60: HD background pack %s: %d images\n", dir, int(m_hd_bgs.size()));
++	size_t n = 0;
++	for (const auto &kv : m_hd_bgs) n += kv.second.size();
++	std::fprintf(stderr, "stun60: HD background pack %s: %d images\n", dir, int(n));
++}
++
++void harddriv_state::hd_add_bg(uint32_t key, s60hd_bg &&bg)
++{
++	bg.used = s60_used_pens(bg.pen);
++	bg.palkey = s60_palkey(bg.ref, bg.used);
++	std::vector<s60hd_bg> &v = m_hd_bgs[key];
++	for (s60hd_bg &o : v)
++		if (o.palkey == bg.palkey && o.w == bg.w && o.h == bg.h) { o = std::move(bg); return; }
++	v.push_back(std::move(bg));
 +}
 +
 +// Parse the list the GSP just drew (its address is at FFF77F30/40) into polygons.
@@ -631,10 +663,23 @@
 +		for (const s60hd_blit &b : list->blits)
 +		{
 +			auto it = m_hd_bgs.find(b.key);
-+			if (it != m_hd_bgs.end() && it->second.w == b.w && it->second.h == b.h)
++			if (it == m_hd_bgs.end()) continue;
++			// the palette variant closest to the colours on screen now
++			const s60hd_bg *best = nullptr; int bestd = 0;
++			for (const s60hd_bg &v : it->second)
 +			{
-+				hd_draw_bg(bitmap, b, it->second, W, H);
++				if (v.w != b.w || v.h != b.h) continue;
++				int d = 0;
++				for (uint8_t p : v.used)
++				{
++					const int pv = bank + p;
++					const rgb_t c = pens[pv < npens ? pv : 0];
++					d += std::abs(c.r() - v.ref[p][0]) + std::abs(c.g() - v.ref[p][1]) + std::abs(c.b() - v.ref[p][2]);
++				}
++				if (!best || d < bestd) { best = &v; bestd = d; }
 +			}
++			if (best)
++				hd_draw_bg(bitmap, b, *best, W, H);
 +		}
 +
 +	auto t1 = std::chrono::steady_clock::now();
@@ -731,10 +776,10 @@
 +	const bool transp = b.flags & 0x20;
 +	const rgb_t *pens = m_palette->palette()->entry_list_adjusted();
 +	const int npens = m_palette->entries();
-+	int fac[16][3]; bool same = true;
-+	for (int i = 0; i < 16; i++)
++	int fac[256][3]; bool same = true;
++	for (uint8_t i : bg.used)
 +	{
-+		const int v = bank + 240 + i;
++		const int v = bank + i;
 +		const rgb_t live = pens[v < npens ? v : 0];
 +		const int l[3] = { live.r(), live.g(), live.b() };
 +		for (int c = 0; c < 3; c++)
@@ -772,8 +817,7 @@
 +					uint32_t v = srow[ix0 + xx];
 +					if (!same)
 +					{
-+						const int pi = prow[ix0 + xx] - 240;
-+						if (pi >= 0 && pi < 16)
++						const int pi = prow[ix0 + xx];
 +						{
 +							int ch[3] = { int((v >> 16) & 0xff), int((v >> 8) & 0xff), int(v & 0xff) };
 +							for (int k = 0; k < 3; k++)
@@ -803,7 +847,7 @@
 +
 +namespace {
 +
-+struct s60_img { int stream, index, w, h; std::vector<uint8_t> px; uint8_t pal[16][3]; uint32_t key; std::vector<uint8_t> left, right; int lw, rw; };
++struct s60_img { int stream, index, w, h, prio; bool dark; std::vector<uint8_t> px; uint8_t pal[256][3]; uint32_t key, palkey; std::vector<uint8_t> left, right; int lw, rw; };
 +
 +uint32_t s60_fnv(const uint8_t *p, size_t n)
 +{
@@ -846,51 +890,74 @@
 +	return false;
 +}
 +
-+// all gameplay backgrounds (every pen 240-255) with their palettes, level 1-3 skylines first
++// unpack every image of stream n (GSP byte order); empty if the stream is not valid
++std::vector<s60_img> s60_stream_images(const std::vector<uint8_t> &rom, int n)
++{
++	auto l32 = [&rom] (uint32_t a) { return a + 4 <= rom.size() ? (uint32_t(rom[a]) << 24) | (rom[a + 1] << 16) | (rom[a + 2] << 8) | rom[a + 3] : 0u; };
++	std::vector<s60_img> ims;
++	const uint32_t p = l32(0xbfe00 + 4 * n);
++	std::vector<uint8_t> buf;
++	if (!p || p >= rom.size() || !s60_unpack(rom, p, buf)) return ims;
++	if (buf.size() & 1) buf.push_back(0);
++	for (size_t i = 0; i + 1 < buf.size(); i += 2) std::swap(buf[i], buf[i + 1]);   // 68010 big-endian words -> GSP order
++	for (size_t o = 0; o + 12 <= buf.size(); )
++	{
++		const int h = buf[o] | (buf[o + 1] << 8), w = buf[o + 2] | (buf[o + 3] << 8);
++		if (w <= 0 || w > 1024 || h <= 0 || h > 512 || o + 12 + size_t(w) * h > buf.size()) break;
++		s60_img im;
++		im.stream = n; im.index = int(ims.size()); im.w = w; im.h = h; im.prio = 0;
++		im.px.assign(buf.begin() + o + 12, buf.begin() + o + 12 + size_t(w) * h);
++		std::memset(im.pal, 0, sizeof(im.pal));
++		im.key = s60_fnv(im.px.data(), im.px.size());
++		ims.push_back(std::move(im));
++		o += 12 + size_t(w) * h;
++	}
++	for (size_t i = 0; i < ims.size(); i++)      // wrap-around neighbours (panoramas are drawn as image i next to image i+1)
++	{
++		const s60_img &l = ims[(i + ims.size() - 1) % ims.size()], &r = ims[(i + 1) % ims.size()];
++		const bool same_h = l.h == ims[i].h && r.h == ims[i].h;
++		ims[i].left = same_h ? l.px : ims[i].px; ims[i].lw = same_h ? l.w : ims[i].w;
++		ims[i].right = same_h ? r.px : ims[i].px; ims[i].rw = same_h ? r.w : ims[i].w;
++	}
++	return ims;
++}
++
++// Every background the game shows, with the palette it is shown with, in play order. Per level L (ROM tables):
++// skyline = image $4CB1C[L], between-level screen = image $4CB36[L]; pens 240-255 come from the image's palette
++// ($48068[n]: 16 RGB), pens 0-239 from the level's base palette ($47406[L]: 256 RGB, routine $0296AA).
 +std::vector<s60_img> s60_find_images(const std::vector<uint8_t> &rom)
 +{
 +	auto l32 = [&rom] (uint32_t a) { return a + 4 <= rom.size() ? (uint32_t(rom[a]) << 24) | (rom[a + 1] << 16) | (rom[a + 2] << 8) | rom[a + 3] : 0u; };
 +	std::vector<s60_img> res;
-+	std::vector<uint32_t> seen;
-+	for (int n = 1; n < 128; n++)
-+	{
-+		const uint32_t p = l32(0xbfe00 + 4 * n);
-+		if (!p || p >= rom.size() || rom[p] != 0) break;
-+		if (std::find(seen.begin(), seen.end(), p) != seen.end()) continue;
-+		seen.push_back(p);
-+		const uint32_t pp = l32(0x48068 + 4 * n);
-+		if (!pp || pp + 48 > rom.size()) continue;
-+		std::vector<uint8_t> buf;
-+		if (!s60_unpack(rom, p, buf)) continue;
-+		if (buf.size() & 1) buf.push_back(0);
-+		for (size_t i = 0; i + 1 < buf.size(); i += 2) std::swap(buf[i], buf[i + 1]);   // 68010 big-endian words -> GSP order
-+		std::vector<s60_img> ims;
-+		for (size_t o = 0; o + 12 <= buf.size(); )
++	std::vector<uint64_t> seen;
++	// skylines first (play order), then the level-start screens, then any other image that uses only its own
++	// 16 colours (attract mode, ending)
++	for (int pass = 0; pass < 3; pass++)
++		for (int L = 0; L < (pass == 2 ? 127 : 26); L++)
 +		{
-+			const int h = buf[o] | (buf[o + 1] << 8), w = buf[o + 2] | (buf[o + 3] << 8);
-+			if (w <= 0 || w > 1024 || h <= 0 || h > 512 || o + 12 + size_t(w) * h > buf.size()) break;
-+			s60_img im;
-+			im.stream = n; im.index = int(ims.size()); im.w = w; im.h = h;
-+			im.px.assign(buf.begin() + o + 12, buf.begin() + o + 12 + size_t(w) * h);
-+			std::memcpy(im.pal, &rom[pp], 48);
-+			im.key = s60_fnv(im.px.data(), im.px.size());
-+			ims.push_back(std::move(im));
-+			o += 12 + size_t(w) * h;
++			const int n = pass == 2 ? L + 1 : rom[(pass ? 0x4cb36 : 0x4cb1c) + L];
++			const uint32_t ip = l32(0x48068 + 4 * n), lp = l32(0x47406 + 4 * (pass == 2 ? 0 : L));
++			if (n <= 0 || n >= 128 || !ip || ip + 48 > rom.size() || !lp || lp + 768 > rom.size()) continue;
++			for (s60_img &im : s60_stream_images(rom, n))
++			{
++				std::memcpy(im.pal, &rom[lp], 768);
++				std::memcpy(im.pal[240], &rom[ip], 48);
++				const std::vector<uint8_t> used = s60_used_pens(im.px);
++				if (used.empty() || (pass != 1 && used.front() < 240)) continue;   // skylines use only their own 16 colours
++				if (used.front() >= 240) std::memset(im.pal, 0, 240 * 3);          // (so one variant serves every level)
++				im.palkey = s60_palkey(im.pal, used);
++				// dark images (night city, galaxy): the detail is small points of light, which the general model wipes
++				// out; the anime-video model keeps them (compared on the night city)
++				size_t darkpx = 0;
++				for (uint8_t p : im.px) darkpx += std::max({ im.pal[p][0], im.pal[p][1], im.pal[p][2] }) < 48;
++				im.dark = darkpx * 2 > im.px.size();
++				const uint64_t id = (uint64_t(im.key) << 32) | im.palkey;
++				if (std::find(seen.begin(), seen.end(), id) != seen.end()) continue;
++				seen.push_back(id);
++				im.prio = pass * 100 + L;
++				res.push_back(std::move(im));
++			}
 +		}
-+		bool all = !ims.empty();
-+		for (const s60_img &im : ims) all = all && *std::min_element(im.px.begin(), im.px.end()) >= 240;
-+		if (!all) continue;
-+		for (size_t i = 0; i < ims.size(); i++)
-+		{
-+			const s60_img &l = ims[(i + ims.size() - 1) % ims.size()], &r = ims[(i + 1) % ims.size()];
-+			ims[i].left = l.px; ims[i].lw = l.w; ims[i].right = r.px; ims[i].rw = r.w;
-+			if (l.h != ims[i].h || r.h != ims[i].h) { ims[i].left = ims[i].right = ims[i].px; ims[i].lw = ims[i].rw = ims[i].w; }
-+		}
-+		for (auto &im : ims) res.push_back(std::move(im));
-+	}
-+	// levels 1, 2, 3 first (open plain, canyon, golden hills), so the first course is ready almost at once
-+	auto prio = [] (int s) { return s == 20 ? 0 : s == 16 ? 1 : s == 21 ? 2 : 3; };
-+	std::stable_sort(res.begin(), res.end(), [&] (const s60_img &a, const s60_img &b) { return prio(a.stream) < prio(b.stream); });
 +	return res;
 +}
 +
@@ -928,12 +995,12 @@
 +	dst = pass(tmp, dw, sh, dh, false);
 +}
 +
-+bool s60_run_esrgan(const std::string &exe, const std::filesystem::path &in, const std::filesystem::path &out, const std::filesystem::path &log)
++bool s60_run_esrgan(const std::string &exe, const char *model, const std::filesystem::path &in, const std::filesystem::path &out, const std::filesystem::path &log)
 +{
 +	const std::filesystem::path models = std::filesystem::path(exe).parent_path() / "models";
 +#if defined(_WIN32)
 +	std::wstring cmd = L"\"" + std::filesystem::path(exe).wstring() + L"\" -i \"" + in.wstring() + L"\" -o \"" + out.wstring()
-+			+ L"\" -n realesrgan-x4plus -s 4 -m \"" + models.wstring() + L"\"";
++			+ L"\" -n " + std::filesystem::path(model).wstring() + L" -s 4 -m \"" + models.wstring() + L"\"";
 +	STARTUPINFOW si = { sizeof(si) }; PROCESS_INFORMATION pi;
 +	si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
 +	if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
@@ -944,7 +1011,7 @@
 +	return code == 0;
 +#else
 +	const std::string cmd = "nice -n 19 \"" + exe + "\" -i \"" + in.string() + "\" -o \"" + out.string()
-+			+ "\" -n realesrgan-x4plus -s 4 -m \"" + models.string() + "\" >\"" + log.string() + "\" 2>&1";
++			+ "\" -n " + model + " -s 4 -m \"" + models.string() + "\" >\"" + log.string() + "\" 2>&1";
 +	return std::system(cmd.c_str()) == 0;
 +#endif
 +}
@@ -958,7 +1025,7 @@
 +		{
 +			const int sy = std::clamp(y - pad, 0, im.h - 1), sx = x - pad;
 +			const uint8_t p = sx < 0 ? im.left[sy * im.lw + im.lw + sx] : sx >= im.w ? im.right[sy * im.rw + sx - im.w] : im.px[sy * im.w + sx];
-+			const uint8_t *c = im.pal[(p - 240) & 15];
++			const uint8_t *c = im.pal[p];
 +			bm.pix(y, x) = rgb_t(0xff, c[0], c[1], c[2]);
 +		}
 +	util::core_file::ptr f;
@@ -967,7 +1034,7 @@
 +}
 +
 +void s60_build_thread(std::shared_ptr<harddriv_state::s60hd_build> st, std::vector<uint8_t> rom, std::string pack, std::string exe,
-+		int SX, int SY, std::vector<uint32_t> have)
++		int SX, int SY, std::vector<uint64_t> have)
 +{
 +	namespace fs = std::filesystem;
 +	// lowest priority: the game must keep its frame rate while this runs
@@ -981,24 +1048,28 @@
 +	auto secs = [&t0] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
 +	std::vector<s60_img> todo;
 +	for (auto &im : s60_find_images(rom))
-+		if (std::find(have.begin(), have.end(), im.key) == have.end())
++		if (std::find(have.begin(), have.end(), (uint64_t(im.key) << 32) | im.palkey) == have.end())
 +			todo.push_back(std::move(im));
 +	{ std::lock_guard<std::mutex> g(st->lock); st->total = int(todo.size()); }
 +	std::error_code ec;
 +	const fs::path work = fs::path(pack) / "_work";
 +	if (todo.empty() || !fs::exists(exe, ec)) { std::lock_guard<std::mutex> g(st->lock); st->finished = true; return; }
 +	std::fprintf(stderr, "stun60: building %d HD backgrounds in the background (%s)\n", int(todo.size()), exe.c_str());
-+	// two batches: the first course's skyline (ready in seconds), then everything else
++	// batches (one Real-ESRGAN start each, ~5 s of model loading): the first course's skyline (ready in seconds),
++	// then the rest grouped by model
 +	size_t first = 0;
-+	while (first < todo.size() && todo[first].stream == todo[0].stream) first++;
++	while (first < todo.size() && todo[first].prio == todo[0].prio) first++;
++	std::stable_sort(todo.begin() + first, todo.end(), [] (const s60_img &a, const s60_img &b) { return a.dark < b.dark; });
 +	for (size_t b0 = 0; b0 < todo.size(); )
 +	{
-+		const size_t b1 = b0 == 0 ? first : todo.size();
++		size_t b1 = b0 + 1;
++		while (b1 < todo.size() && todo[b1].dark == todo[b0].dark && (b0 >= first || b1 < first)) b1++;
++		const char *model = todo[b0].dark ? "realesr-animevideov3" : "realesrgan-x4plus";
 +		fs::remove_all(work, ec);
 +		fs::create_directories(work / "in", ec); fs::create_directories(work / "out", ec);
 +		for (size_t i = b0; i < b1; i++)
 +			s60_write_png(work / "in" / util::string_format("%d.png", int(i)), todo[i], PAD);
-+		const bool ok = s60_run_esrgan(exe, work / "in", work / "out", fs::path(pack) / "esrgan.log");
++		const bool ok = s60_run_esrgan(exe, model, work / "in", work / "out", fs::path(pack) / "esrgan.log");
 +		for (size_t i = b0; i < b1 && ok; i++)
 +		{
 +			const s60_img &im = todo[i];
@@ -1017,7 +1088,7 @@
 +			s60_resample(src, 4 * W, 4 * H, dst, W * SX, H * SY);
 +			harddriv_state::s60hd_bg bg;
 +			bg.w = im.w; bg.h = im.h;
-+			std::memcpy(bg.ref, im.pal, 48);
++			std::memcpy(bg.ref, im.pal, sizeof(bg.ref));
 +			const int IW = im.w * SX, IH = im.h * SY;
 +			bg.rgb.resize(size_t(IW) * IH); bg.pen.resize(size_t(IW) * IH);
 +			for (int y = 0; y < IH; y++)
@@ -1029,12 +1100,12 @@
 +					bg.pen[size_t(y) * IW + x] = im.px[(y / SY) * im.w + x / SX];
 +				}
 +			// save (write a temporary file, then rename, so a half-written pack file is never loaded)
-+			const fs::path dstp = fs::path(pack) / util::string_format("s%02d_%d.s60bg", im.stream, im.index), tmpp = dstp.string() + ".tmp";
++			const fs::path dstp = fs::path(pack) / util::string_format("s%02d_%d_%08x.s60bg", im.stream, im.index, im.palkey), tmpp = dstp.string() + ".tmp";
 +			{
 +				std::ofstream o(tmpp, std::ios::binary);
 +				const uint16_t hdr[4] = { uint16_t(im.w), uint16_t(im.h), uint16_t(SX), uint16_t(SY) };
-+				o.write("S60BG01", 8); o.write(reinterpret_cast<const char *>(&im.key), 4); o.write(reinterpret_cast<const char *>(hdr), 8);
-+				o.write(reinterpret_cast<const char *>(bg.ref), 48);
++				o.write("S60BG03", 8); o.write(reinterpret_cast<const char *>(&im.key), 4); o.write(reinterpret_cast<const char *>(hdr), 8);
++				o.write(reinterpret_cast<const char *>(bg.ref), sizeof(bg.ref));
 +				o.write(reinterpret_cast<const char *>(bg.rgb.data()), bg.rgb.size() * 4);
 +				o.write(reinterpret_cast<const char *>(bg.pen.data()), bg.pen.size());
 +			}
@@ -1042,7 +1113,7 @@
 +			std::lock_guard<std::mutex> g(st->lock);
 +			st->ready.emplace_back(im.key, std::move(bg));
 +			st->done++;
-+			std::fprintf(stderr, "stun60: HD background %d/%d ready (s%02d_%d, %.1f s)\n", st->done, st->total, im.stream, im.index, secs());
++			std::fprintf(stderr, "stun60: HD background %d/%d ready (s%02d_%d %08x%s, %.1f s)\n", st->done, st->total, im.stream, im.index, im.palkey, im.dark ? " dark" : "", secs());
 +		}
 +		if (!ok) { std::fprintf(stderr, "stun60: Real-ESRGAN failed (see esrgan.log in the pack folder); keeping the original backgrounds\n"); break; }
 +		b0 = b1;
@@ -1072,8 +1143,9 @@
 +		rom[i] = b[swap ? (i ^ 1) : i];
 +	std::error_code ec;
 +	std::filesystem::create_directories(pack, ec);
-+	std::vector<uint32_t> have;
-+	for (const auto &kv : m_hd_bgs) have.push_back(kv.first);
++	std::vector<uint64_t> have;
++	for (const auto &kv : m_hd_bgs)
++		for (const s60hd_bg &v : kv.second) have.push_back((uint64_t(kv.first) << 32) | v.palkey);
 +	m_hd_build = std::make_shared<s60hd_build>();
 +	std::thread(s60_build_thread, m_hd_build, std::move(rom), std::string(pack), std::string(exe), m_hd_sx, m_hd_sy, std::move(have)).detach();
 +}
@@ -1085,7 +1157,7 @@
 +	std::unique_lock<std::mutex> g(m_hd_build->lock, std::try_to_lock);
 +	if (!g.owns_lock()) return;
 +	for (auto &kv : m_hd_build->ready)
-+		m_hd_bgs[kv.first] = std::move(kv.second);
++		hd_add_bg(kv.first, std::move(kv.second));
 +	m_hd_build->ready.clear();
 +	if (m_hd_build->finished)
 +	{
