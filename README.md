@@ -1,22 +1,28 @@
-# S.T.U.N. Runner 60fps
+# S.T.U.N. Runner HD60
 
-Atari's **S.T.U.N. Runner** (1989 arcade) at a real **60 frames per second** and the correct game speed, running in a
-lightly patched MAME 0.285 plus a Lua script.
+Atari's **S.T.U.N. Runner** (1989 arcade) at a real **60 frames per second** and the correct game speed, with the 3D scene
+**redrawn in high resolution** (1536x1200), running in a lightly patched MAME 0.285 plus a Lua script.
 
-The original game draws a new image only every third refresh (about 20 fps), and its logic advances once per drawn frame,
-so simply unlocking the frame cap makes the whole game run three times too fast. This project keeps the game logic at its
-native 20 ticks per second and asks the game's **own 3D hardware** (the ADSP-2100 math board) to render two extra
-in-between frames per tick, with the camera and moving objects interpolated. The in-between images are real renders of
-the scene, not blended or AI-generated frames.
+This is the continuation of [STUN60](https://github.com/HornheaDD/STUN60) (60 fps only, v1.0), which stays as the classic
+release. Everything from STUN60 is included here; press **H** in-game to switch between the HD redraw and the original
+512x240 picture.
+
+**60 fps:** the original game draws a new image only every third refresh (about 20 fps), and its logic advances once per
+drawn frame, so simply unlocking the frame cap makes the whole game run three times too fast. This project keeps the game
+logic at its native 20 ticks per second and asks the game's **own 3D hardware** (the ADSP-2100 math board) to render two
+extra in-between frames per tick, with the camera and moving objects interpolated. The in-between images are real renders
+of the scene, not blended or AI-generated frames.
+
+**HD redraw:** the patched driver reads the game's own polygon list (already projected to the screen by the game) and
+redraws every 3D polygon at 3x5 the resolution on a second screen, with the game's colours. Everything that is not 3D
+(skyline backgrounds, HUD, text) is taken from the original picture and scaled up. Upscaled backgrounds made from your own
+ROM are in progress.
 
 Also included: an optional CRT look (MAME BGFX `crt-geom` shaders, toggled in-game with **C**), an on-screen
 statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
 
-`hd-experiment/stun60-sidebyside-realtime.mp4` shows 20 fps vs 60 fps from an early offline test
-(its HD redraw is a separate experiment, not part of the live build yet).
-
-**Download:** ready-to-run Linux (AppImage / tar.gz) and Windows builds are on the
-[Releases page](https://github.com/HornheaDD/STUN60/releases/latest).
+**Download:** HD builds will appear on the [Releases page](https://github.com/HornheaDD/STUN_HD60/releases).
+The 60 fps-only builds are on the [STUN60 Releases page](https://github.com/HornheaDD/STUN60/releases/latest).
 
 **No ROMs are included.** You need your own MAME 0.285 `stunrun.zip` (parent set).
 
@@ -46,7 +52,7 @@ scripts/run-stun60.sh      # uses ~/mame/... paths: clone the repo to ~/mame, or
 cross-compiles `stun60.exe` with MinGW-w64.
 
 Controls: MAME defaults (5 = coin, 1 = start, Tab = menu, Esc = quit), **O** = overlay, **C** = screen effect
-(CRT deluxe / CRT sharp / off). See `package/README.txt` for the end-user notes.
+(CRT deluxe / CRT sharp / off), **H** = HD redraw / original picture. `STUN60_HD=` (empty) starts without the HD screen. See `package/README.txt` for the end-user notes.
 
 ## Repository layout
 
