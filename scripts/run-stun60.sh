@@ -11,8 +11,11 @@ export STUN60_CLOCK="${STUN60_CLOCK:-maincpu=3,gsp=4,adsp=8}"
 # STUN60_HD=SXxSY: second screen with the 3D scene redrawn at SX x SY the resolution (H toggles HD/original in-game).
 # Default 3x5 (1536x1200); set STUN60_HD= (empty) to run without it.
 export STUN60_HD="${STUN60_HD-3x5}"
-# HD background pack (built from your own ROM: python3 ~/mame/hdpack/build_pack.py ~/mame/roms/stunrun.zip ~/mame/hdpack/pack)
-[ -z "${STUN60_HDPACK+x}" ] && [ -d "$HOME/mame/hdpack/pack" ] && export STUN60_HDPACK="$HOME/mame/hdpack/pack"
+# HD backgrounds: the game builds them itself from your ROM on first launch, in the background (Real-ESRGAN, ~15 s on a
+# gaming GPU; the original skylines are shown until each one is ready) and keeps them in STUN60_HDPACK for next time.
+export STUN60_HDPACK="${STUN60_HDPACK-$HOME/mame/hdpack/pack}"
+E="$HOME/mame/build/tools/realesrgan/realesrgan-ncnn-vulkan"
+[ -z "${STUN60_ESRGAN+x}" ] && [ -x "$E" ] && export STUN60_ESRGAN="$E"
 M="$HOME/.mame"
 B="$HOME/mame/build/mame-mame0285"
 mkdir -p "$M/cfg" "$M/nvram" "$M/snap"

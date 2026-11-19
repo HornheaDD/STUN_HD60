@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Build the HD background pack for S.T.U.N. Runner HD60 from YOUR OWN stunrun.zip.
 
+Players don't need this: the game builds the same pack itself on first launch, in a background thread
+(harddriv_v.cpp, STUN60_HDPACK + STUN60_ESRGAN). This script is the reference implementation / dev tool.
+
 Unpacks the background images with stunbg.py, upscales them with Real-ESRGAN (realesrgan-x4plus) and writes one
 .s60bg file per image into the pack folder. The pack is ROM-derived: keep it on your own machine, never publish it.
 

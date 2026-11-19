@@ -182,15 +182,16 @@
  
 --- a/src/mame/atari/harddriv.h
 +++ b/src/mame/atari/harddriv.h
-@@ -28,6 +28,7 @@
+@@ -28,6 +28,8 @@
  #include "machine/eeprompar.h"
  #include "machine/mc68681.h"
  #include "machine/timekpr.h"
 +#include <unordered_map>
++#include <mutex>
  #include "machine/timer.h"
  
  #include "sound/dac.h"
-@@ -384,6 +385,45 @@
+@@ -384,6 +386,53 @@
  
  	required_region_ptr<uint16_t> m_sim_memory;
  	uint16_t                m_som_memory[0x8000/2]{};
@@ -203,6 +204,7 @@
 +	void s60_command(uint16_t cmd);
 +	// stun60 HD (local patch): a second screen showing the 3D scene redrawn at SX x SY times the resolution
 +	// (env STUN60_HD="3x5"; unset = off). Polygons come from the display list the GSP just drew.
++public:   // stun60 HD types are shared with the background builder thread (harddriv_v.cpp)
 +	struct s60hd_poly { uint16_t flags; uint8_t pen; int y0; std::vector<int64_t> l, r; };
 +	struct s60hd_blit { int16_t x, y; uint16_t flags; uint32_t addr; uint16_t w, h; uint32_t key; };
 +	struct s60hd_list { std::vector<s60hd_poly> polys; std::vector<s60hd_blit> blits; };
@@ -212,6 +214,13 @@
 +	std::vector<s60hd_blit> m_hd_blits_cur;          // op 8 blits of the list the GSP is drawing
 +	memory_passthrough_handler m_hd_optap;
 +	uint32_t                m_hd_bg_drawn = 0;
++	// background builder (first run): unpacks the images from the 68010 ROM, upscales them with Real-ESRGAN
++	// ($STUN60_ESRGAN) in a low-priority thread and hands each finished image to the emulation thread
++	struct s60hd_build { std::mutex lock; std::vector<std::pair<uint32_t, s60hd_bg>> ready; int total = 0, done = 0; bool finished = false; };
++	std::shared_ptr<s60hd_build> m_hd_build;
++protected:
++	void hd_start_builder();
++	void hd_take_built();
 +	void hd_load_pack();
 +	void hd_install_optap(s32 param);
 +	bool                    m_hd_optap_on = false;
@@ -236,7 +245,7 @@
  	uint16_t *              m_adsp_pgm_memory_word = 0;
  
  	uint16_t *              m_ds3_sdata_memory = 0;
-@@ -676,7 +716,7 @@
+@@ -676,7 +725,7 @@
  protected:
  	virtual void device_add_mconfig(machine_config &config) override ATTR_COLD;
  	virtual void device_start() override ATTR_COLD;
@@ -264,19 +273,29 @@
  uint16_t harddriv_state::hd68k_port0_r()
 --- a/src/mame/atari/harddriv_v.cpp
 +++ b/src/mame/atari/harddriv_v.cpp
-@@ -9,6 +9,11 @@
+@@ -9,6 +9,21 @@
  #include "emu.h"
  #include "cpu/tms34010/tms34010.h"
  #include "harddriv.h"
 +#include "render.h"
 +
++#include "util/corefile.h"
++#include "util/png.h"
++
 +#include <chrono>
++#include <cmath>
 +#include <filesystem>
 +#include <fstream>
++#include <thread>
++#if defined(_WIN32)
++#include <windows.h>
++#else
++#include <sys/resource.h>
++#endif
  
  
  
-@@ -450,7 +455,490 @@
+@@ -450,7 +465,797 @@
  			color = vram_base[coloridx >> 1];
  		dest[x] = m_gfx_palettebank * 256 + color;
  	}
@@ -343,7 +362,7 @@
 +				if (data)
 +				{
 +					hd_parse_list();
-+					if (!m_hd_optap_on && !m_hd_bgs.empty())
++					if (!m_hd_optap_on && (m_hd_build || !m_hd_bgs.empty()))
 +					{
 +						m_hd_optap_on = true;
 +						machine().scheduler().synchronize(timer_expired_delegate(FUNC(harddriv_state::hd_install_optap), this));
@@ -356,6 +375,7 @@
 +				}
 +			});
 +	hd_load_pack();
++	hd_start_builder();
 +}
 +
 +// Record display-list op 8 blits. Installed once the game runs (a tap installed in device_start is lost when the
@@ -418,6 +438,7 @@
 +// Parse the list the GSP just drew (its address is at FFF77F30/40) into polygons.
 +void harddriv_state::hd_parse_list()
 +{
++	hd_take_built();
 +	address_space &gsp = m_gsp->space(AS_PROGRAM);
 +	auto w = [&gsp] (uint32_t a) -> uint16_t { return gsp.read_word(a); };
 +	const uint32_t ptr = w(0xfff77f30) | (uint32_t(w(0xfff77f40)) << 16);
@@ -765,6 +786,311 @@
 +				m_hd_bg_drawn += SX;
 +			}
 +		}
++	}
++}
++
++/*************************************
++ *
++ *  stun60 HD: background pack builder (first run, in a background thread)
++ *
++ *  The 68010 program ROM holds the background images as compressed streams (pointer table $BFE00; the game's own
++ *  unpacker is at $022766) and their palettes (pointer table $48068: 16 RGB triplets for pens 240-255). Each gameplay
++ *  background is unpacked, padded with its wrap-around neighbour, upscaled 4x by Real-ESRGAN (realesrgan-x4plus, run as
++ *  a low-priority child process), resampled to SX x SY with Lanczos-3 and saved as a .s60bg file in the pack folder,
++ *  then handed to the emulation thread. Same algorithm and file format as hdpack/build_pack.py.
++ *
++ *************************************/
++
++namespace {
++
++struct s60_img { int stream, index, w, h; std::vector<uint8_t> px; uint8_t pal[16][3]; uint32_t key; std::vector<uint8_t> left, right; int lw, rw; };
++
++uint32_t s60_fnv(const uint8_t *p, size_t n)
++{
++	uint32_t h = 2166136261u;
++	for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
++	return h;
++}
++
++// unpack one stream (see hdpack/stunbg.py for the format); returns false on a malformed stream
++bool s60_unpack(const std::vector<uint8_t> &rom, uint32_t a, std::vector<uint8_t> &out)
++{
++	uint8_t t[16] = { 0 };
++	if (a >= rom.size() || rom[a] != 0) return false;
++	while (a < rom.size() && out.size() < 0x80000)
++	{
++		const uint8_t c = rom[a++], n = c & 0x3f;
++		if (c & 0x80)
++		{
++			if (!n || a >= rom.size()) return false;
++			const uint8_t b = rom[a++];
++			for (int i = 0; i < n; i++)
++			{
++				if (c & 0x40) { out.push_back(t[b >> 4]); out.push_back(t[b & 15]); }
++				else out.push_back(b);
++			}
++		}
++		else if (c & 0x40)
++		{
++			if (!n) return true;
++			for (int i = 0; i < n && a < rom.size(); i++, a++) { out.push_back(t[rom[a] >> 4]); out.push_back(t[rom[a] & 15]); }
++		}
++		else if (n)
++			for (int i = 0; i < n && a < rom.size(); i++) out.push_back(rom[a++]);
++		else
++		{
++			if (a + 16 > rom.size()) return false;
++			std::memcpy(t, &rom[a], 16); a += 16;
++		}
++	}
++	return false;
++}
++
++// all gameplay backgrounds (every pen 240-255) with their palettes, level 1-3 skylines first
++std::vector<s60_img> s60_find_images(const std::vector<uint8_t> &rom)
++{
++	auto l32 = [&rom] (uint32_t a) { return a + 4 <= rom.size() ? (uint32_t(rom[a]) << 24) | (rom[a + 1] << 16) | (rom[a + 2] << 8) | rom[a + 3] : 0u; };
++	std::vector<s60_img> res;
++	std::vector<uint32_t> seen;
++	for (int n = 1; n < 128; n++)
++	{
++		const uint32_t p = l32(0xbfe00 + 4 * n);
++		if (!p || p >= rom.size() || rom[p] != 0) break;
++		if (std::find(seen.begin(), seen.end(), p) != seen.end()) continue;
++		seen.push_back(p);
++		const uint32_t pp = l32(0x48068 + 4 * n);
++		if (!pp || pp + 48 > rom.size()) continue;
++		std::vector<uint8_t> buf;
++		if (!s60_unpack(rom, p, buf)) continue;
++		if (buf.size() & 1) buf.push_back(0);
++		for (size_t i = 0; i + 1 < buf.size(); i += 2) std::swap(buf[i], buf[i + 1]);   // 68010 big-endian words -> GSP order
++		std::vector<s60_img> ims;
++		for (size_t o = 0; o + 12 <= buf.size(); )
++		{
++			const int h = buf[o] | (buf[o + 1] << 8), w = buf[o + 2] | (buf[o + 3] << 8);
++			if (w <= 0 || w > 1024 || h <= 0 || h > 512 || o + 12 + size_t(w) * h > buf.size()) break;
++			s60_img im;
++			im.stream = n; im.index = int(ims.size()); im.w = w; im.h = h;
++			im.px.assign(buf.begin() + o + 12, buf.begin() + o + 12 + size_t(w) * h);
++			std::memcpy(im.pal, &rom[pp], 48);
++			im.key = s60_fnv(im.px.data(), im.px.size());
++			ims.push_back(std::move(im));
++			o += 12 + size_t(w) * h;
++		}
++		bool all = !ims.empty();
++		for (const s60_img &im : ims) all = all && *std::min_element(im.px.begin(), im.px.end()) >= 240;
++		if (!all) continue;
++		for (size_t i = 0; i < ims.size(); i++)
++		{
++			const s60_img &l = ims[(i + ims.size() - 1) % ims.size()], &r = ims[(i + 1) % ims.size()];
++			ims[i].left = l.px; ims[i].lw = l.w; ims[i].right = r.px; ims[i].rw = r.w;
++			if (l.h != ims[i].h || r.h != ims[i].h) { ims[i].left = ims[i].right = ims[i].px; ims[i].lw = ims[i].rw = ims[i].w; }
++		}
++		for (auto &im : ims) res.push_back(std::move(im));
++	}
++	// levels 1, 2, 3 first (open plain, canyon, golden hills), so the first course is ready almost at once
++	auto prio = [] (int s) { return s == 20 ? 0 : s == 16 ? 1 : s == 21 ? 2 : 3; };
++	std::stable_sort(res.begin(), res.end(), [&] (const s60_img &a, const s60_img &b) { return prio(a.stream) < prio(b.stream); });
++	return res;
++}
++
++// separable Lanczos-3 resample of an RGB float image (PIL-style: the kernel widens when shrinking)
++void s60_resample(const std::vector<float> &src, int sw, int sh, std::vector<float> &dst, int dw, int dh)
++{
++	auto pass = [] (const std::vector<float> &in, int iw, int ih, int ow, bool horiz) {
++		const int inlen = horiz ? iw : ih, outlen = ow, other = horiz ? ih : iw;
++		const double scale = double(inlen) / outlen, fs = std::max(scale, 1.0), support = 3.0 * fs;
++		std::vector<float> out(size_t(horiz ? ow * ih : iw * ow) * 3);
++		auto lanczos = [] (double x) { x = std::fabs(x); if (x < 1e-9) return 1.0; if (x >= 3.0) return 0.0;
++			const double px = 3.14159265358979323846 * x; return 3.0 * std::sin(px) * std::sin(px / 3.0) / (px * px); };
++		for (int o = 0; o < outlen; o++)
++		{
++			const double c = (o + 0.5) * scale;
++			const int i0 = std::max(int(std::floor(c - support)), 0), i1 = std::min(int(std::ceil(c + support)), inlen - 1);
++			std::vector<double> wts; double sum = 0;
++			for (int i = i0; i <= i1; i++) { const double w = lanczos((i + 0.5 - c) / fs); wts.push_back(w); sum += w; }
++			for (int q = 0; q < other; q++)
++				for (int ch = 0; ch < 3; ch++)
++				{
++					double acc = 0;
++					for (int i = i0; i <= i1; i++)
++					{
++						const size_t si = horiz ? (size_t(q) * iw + i) : (size_t(i) * iw + q);
++						acc += in[si * 3 + ch] * wts[i - i0];
++					}
++					const size_t di = horiz ? (size_t(q) * ow + o) : (size_t(o) * iw + q);
++					out[di * 3 + ch] = float(acc / sum);
++				}
++		}
++		return out;
++	};
++	std::vector<float> tmp = pass(src, sw, sh, dw, true);
++	dst = pass(tmp, dw, sh, dh, false);
++}
++
++bool s60_run_esrgan(const std::string &exe, const std::filesystem::path &in, const std::filesystem::path &out, const std::filesystem::path &log)
++{
++	const std::filesystem::path models = std::filesystem::path(exe).parent_path() / "models";
++#if defined(_WIN32)
++	std::wstring cmd = L"\"" + std::filesystem::path(exe).wstring() + L"\" -i \"" + in.wstring() + L"\" -o \"" + out.wstring()
++			+ L"\" -n realesrgan-x4plus -s 4 -m \"" + models.wstring() + L"\"";
++	STARTUPINFOW si = { sizeof(si) }; PROCESS_INFORMATION pi;
++	si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
++	if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
++		return false;
++	WaitForSingleObject(pi.hProcess, INFINITE);
++	DWORD code = 1; GetExitCodeProcess(pi.hProcess, &code);
++	CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
++	return code == 0;
++#else
++	const std::string cmd = "nice -n 19 \"" + exe + "\" -i \"" + in.string() + "\" -o \"" + out.string()
++			+ "\" -n realesrgan-x4plus -s 4 -m \"" + models.string() + "\" >\"" + log.string() + "\" 2>&1";
++	return std::system(cmd.c_str()) == 0;
++#endif
++}
++
++bool s60_write_png(const std::filesystem::path &path, const s60_img &im, int pad)
++{
++	const int W = im.w + 2 * pad, H = im.h + 2 * pad;
++	bitmap_rgb32 bm(W, H);
++	for (int y = 0; y < H; y++)
++		for (int x = 0; x < W; x++)
++		{
++			const int sy = std::clamp(y - pad, 0, im.h - 1), sx = x - pad;
++			const uint8_t p = sx < 0 ? im.left[sy * im.lw + im.lw + sx] : sx >= im.w ? im.right[sy * im.rw + sx - im.w] : im.px[sy * im.w + sx];
++			const uint8_t *c = im.pal[(p - 240) & 15];
++			bm.pix(y, x) = rgb_t(0xff, c[0], c[1], c[2]);
++		}
++	util::core_file::ptr f;
++	if (util::core_file::open(path.string(), OPEN_FLAG_WRITE | OPEN_FLAG_CREATE, f)) return false;
++	return !util::png_write_bitmap(*f, nullptr, bm, 0, nullptr);
++}
++
++void s60_build_thread(std::shared_ptr<harddriv_state::s60hd_build> st, std::vector<uint8_t> rom, std::string pack, std::string exe,
++		int SX, int SY, std::vector<uint32_t> have)
++{
++	namespace fs = std::filesystem;
++	// lowest priority: the game must keep its frame rate while this runs
++#if defined(_WIN32)
++	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
++#else
++	setpriority(PRIO_PROCESS, 0, 19);     // Linux: per-thread nice value for the calling thread
++#endif
++	const int PAD = 16;
++	const auto t0 = std::chrono::steady_clock::now();
++	auto secs = [&t0] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
++	std::vector<s60_img> todo;
++	for (auto &im : s60_find_images(rom))
++		if (std::find(have.begin(), have.end(), im.key) == have.end())
++			todo.push_back(std::move(im));
++	{ std::lock_guard<std::mutex> g(st->lock); st->total = int(todo.size()); }
++	std::error_code ec;
++	const fs::path work = fs::path(pack) / "_work";
++	if (todo.empty() || !fs::exists(exe, ec)) { std::lock_guard<std::mutex> g(st->lock); st->finished = true; return; }
++	std::fprintf(stderr, "stun60: building %d HD backgrounds in the background (%s)\n", int(todo.size()), exe.c_str());
++	// two batches: the first course's skyline (ready in seconds), then everything else
++	size_t first = 0;
++	while (first < todo.size() && todo[first].stream == todo[0].stream) first++;
++	for (size_t b0 = 0; b0 < todo.size(); )
++	{
++		const size_t b1 = b0 == 0 ? first : todo.size();
++		fs::remove_all(work, ec);
++		fs::create_directories(work / "in", ec); fs::create_directories(work / "out", ec);
++		for (size_t i = b0; i < b1; i++)
++			s60_write_png(work / "in" / util::string_format("%d.png", int(i)), todo[i], PAD);
++		const bool ok = s60_run_esrgan(exe, work / "in", work / "out", fs::path(pack) / "esrgan.log");
++		for (size_t i = b0; i < b1 && ok; i++)
++		{
++			const s60_img &im = todo[i];
++			util::core_file::ptr f; bitmap_argb32 up;
++			if (util::core_file::open((work / "out" / util::string_format("%d.png", int(i))).string(), OPEN_FLAG_READ, f) || util::png_read_bitmap(*f, up))
++				continue;
++			const int W = im.w + 2 * PAD, H = im.h + 2 * PAD;
++			if (up.width() != 4 * W || up.height() != 4 * H) continue;
++			std::vector<float> src(size_t(4 * W) * 4 * H * 3), dst;
++			for (int y = 0; y < 4 * H; y++)
++				for (int x = 0; x < 4 * W; x++)
++				{
++					const rgb_t c = up.pix(y, x); float *d = &src[(size_t(y) * 4 * W + x) * 3];
++					d[0] = c.r(); d[1] = c.g(); d[2] = c.b();
++				}
++			s60_resample(src, 4 * W, 4 * H, dst, W * SX, H * SY);
++			harddriv_state::s60hd_bg bg;
++			bg.w = im.w; bg.h = im.h;
++			std::memcpy(bg.ref, im.pal, 48);
++			const int IW = im.w * SX, IH = im.h * SY;
++			bg.rgb.resize(size_t(IW) * IH); bg.pen.resize(size_t(IW) * IH);
++			for (int y = 0; y < IH; y++)
++				for (int x = 0; x < IW; x++)
++				{
++					const float *c = &dst[(size_t(y + PAD * SY) * W * SX + x + PAD * SX) * 3];
++					auto q = [] (float v) { return uint32_t(std::clamp(int(std::lround(v)), 0, 255)); };
++					bg.rgb[size_t(y) * IW + x] = 0xff000000 | (q(c[0]) << 16) | (q(c[1]) << 8) | q(c[2]);
++					bg.pen[size_t(y) * IW + x] = im.px[(y / SY) * im.w + x / SX];
++				}
++			// save (write a temporary file, then rename, so a half-written pack file is never loaded)
++			const fs::path dstp = fs::path(pack) / util::string_format("s%02d_%d.s60bg", im.stream, im.index), tmpp = dstp.string() + ".tmp";
++			{
++				std::ofstream o(tmpp, std::ios::binary);
++				const uint16_t hdr[4] = { uint16_t(im.w), uint16_t(im.h), uint16_t(SX), uint16_t(SY) };
++				o.write("S60BG01", 8); o.write(reinterpret_cast<const char *>(&im.key), 4); o.write(reinterpret_cast<const char *>(hdr), 8);
++				o.write(reinterpret_cast<const char *>(bg.ref), 48);
++				o.write(reinterpret_cast<const char *>(bg.rgb.data()), bg.rgb.size() * 4);
++				o.write(reinterpret_cast<const char *>(bg.pen.data()), bg.pen.size());
++			}
++			fs::rename(tmpp, dstp, ec);
++			std::lock_guard<std::mutex> g(st->lock);
++			st->ready.emplace_back(im.key, std::move(bg));
++			st->done++;
++			std::fprintf(stderr, "stun60: HD background %d/%d ready (s%02d_%d, %.1f s)\n", st->done, st->total, im.stream, im.index, secs());
++		}
++		if (!ok) { std::fprintf(stderr, "stun60: Real-ESRGAN failed (see esrgan.log in the pack folder); keeping the original backgrounds\n"); break; }
++		b0 = b1;
++	}
++	fs::remove_all(work, ec);
++	std::lock_guard<std::mutex> g(st->lock);
++	st->finished = true;
++	std::fprintf(stderr, "stun60: HD background builder finished (%d of %d, %.1f s)\n", st->done, st->total, secs());
++}
++
++} // anonymous namespace
++
++void harddriv_state::hd_start_builder()
++{
++	const char *pack = std::getenv("STUN60_HDPACK"), *exe = std::getenv("STUN60_ESRGAN");
++	if (!pack || !*pack || !exe || !*exe)
++		return;
++	memory_region *rgn = memregion("maincpu");
++	if (!rgn || rgn->bytes() < 0xc0000)
++		return;
++	// ROM bytes in 68010 (big-endian) order, whatever order the region is stored in
++	std::vector<uint8_t> rom(rgn->bytes());
++	const uint8_t *b = rgn->base();
++	// image pointer table entry 1 is 0x00060002: bytes 00 06 00 02 in 68010 order, 06 00 02 00 if stored swapped
++	const bool swap = !(b[0xbfe04] == 0x00 && b[0xbfe05] == 0x06 && b[0xbfe06] == 0x00 && b[0xbfe07] == 0x02);
++	for (size_t i = 0; i < rom.size(); i++)
++		rom[i] = b[swap ? (i ^ 1) : i];
++	std::error_code ec;
++	std::filesystem::create_directories(pack, ec);
++	std::vector<uint32_t> have;
++	for (const auto &kv : m_hd_bgs) have.push_back(kv.first);
++	m_hd_build = std::make_shared<s60hd_build>();
++	std::thread(s60_build_thread, m_hd_build, std::move(rom), std::string(pack), std::string(exe), m_hd_sx, m_hd_sy, std::move(have)).detach();
++}
++
++// emulation thread: take the images the builder has finished (never blocks)
++void harddriv_state::hd_take_built()
++{
++	if (!m_hd_build) return;
++	std::unique_lock<std::mutex> g(m_hd_build->lock, std::try_to_lock);
++	if (!g.owns_lock()) return;
++	for (auto &kv : m_hd_build->ready)
++		m_hd_bgs[kv.first] = std::move(kv.second);
++	m_hd_build->ready.clear();
++	if (m_hd_build->finished)
++	{
++		g.unlock();
++		m_hd_build.reset();
 +	}
 +}
 --- a/src/frontend/mame/luaengine.cpp

@@ -494,3 +494,19 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
   Game quirk: a blit starting at x < 0 lands one line lower (measured 100%), reproduced.
 - Tests: verify 4012/4012 to level 4 with the pack in view, 3D gameplay 58.7 fps (58.5 without); HD off 677/677.
   run-stun60.sh sets STUN60_HDPACK=~/mame/hdpack/pack when that folder exists.
+
+## HD backgrounds, step 3 DONE (2026-11-19): built automatically on first launch, zero wait
+- The user wants no waiting for new players. The driver now builds the pack itself (no Python in the packages):
+  hd_start_builder() copies the maincpu ROM region (byte order detected from table entry 1 = 0x00060002), then a detached
+  std::thread (lowest priority: setpriority(0,19) / THREAD_PRIORITY_LOWEST) unpacks + pads the images, writes PNGs to
+  pack/_work, runs $STUN60_ESRGAN once per batch (batch 1 = level 1's skyline, batch 2 = the rest; `nice -n 19` /
+  CreateProcessW BELOW_NORMAL + CREATE_NO_WINDOW), reads the 4x PNGs (util::png), Lanczos-3 resamples to SXxSY, writes
+  .s60bg via tmp+rename and queues the image; hd_take_built() (from hd_parse_list, try_lock) moves them into m_hd_bgs.
+  Only images whose key isn't already in the pack are built (later launches: nothing to do).
+- Measured (GTX 1070, throttled first launch, empty pack): level 1 skyline ready 3.5 s, all 14 in 14.0 s; per-second wall/late
+  identical to a run with the pack cached; verify 677/677. Output = Python reference (mean diff 0.2/255, pen maps equal).
+  One realesrgan start costs ~6 s (model load), so batching matters. CPU mode (-g -1) doesn't work: no Vulkan = no AI pack
+  (game keeps the original skylines and logs it).
+- run-stun60.sh: STUN60_HDPACK=~/mame/hdpack/pack, STUN60_ESRGAN=build/tools/realesrgan/... when present.
+- Packages (later): bundle realesrgan-ncnn-vulkan + models/realesrgan-x4plus.{bin,param} (~45 MB, BSD-3), set the two env
+  vars in AppRun / launcher.c (pack in the user data folder).
