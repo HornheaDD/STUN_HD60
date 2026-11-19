@@ -182,7 +182,15 @@
  
 --- a/src/mame/atari/harddriv.h
 +++ b/src/mame/atari/harddriv.h
-@@ -384,6 +384,34 @@
+@@ -28,6 +28,7 @@
+ #include "machine/eeprompar.h"
+ #include "machine/mc68681.h"
+ #include "machine/timekpr.h"
++#include <unordered_map>
+ #include "machine/timer.h"
+ 
+ #include "sound/dac.h"
+@@ -384,6 +385,45 @@
  
  	required_region_ptr<uint16_t> m_sim_memory;
  	uint16_t                m_som_memory[0x8000/2]{};
@@ -196,7 +204,18 @@
 +	// stun60 HD (local patch): a second screen showing the 3D scene redrawn at SX x SY times the resolution
 +	// (env STUN60_HD="3x5"; unset = off). Polygons come from the display list the GSP just drew.
 +	struct s60hd_poly { uint16_t flags; uint8_t pen; int y0; std::vector<int64_t> l, r; };
-+	struct s60hd_list { std::vector<s60hd_poly> polys; };
++	struct s60hd_blit { int16_t x, y; uint16_t flags; uint32_t addr; uint16_t w, h; uint32_t key; };
++	struct s60hd_list { std::vector<s60hd_poly> polys; std::vector<s60hd_blit> blits; };
++	// HD background pack (env STUN60_HDPACK = folder of .s60bg files made by hdpack/build_pack.py)
++	struct s60hd_bg { uint16_t w, h; uint8_t ref[16][3]; std::vector<uint32_t> rgb; std::vector<uint8_t> pen; };
++	std::unordered_map<uint32_t, s60hd_bg> m_hd_bgs;
++	std::vector<s60hd_blit> m_hd_blits_cur;          // op 8 blits of the list the GSP is drawing
++	memory_passthrough_handler m_hd_optap;
++	uint32_t                m_hd_bg_drawn = 0;
++	void hd_load_pack();
++	void hd_install_optap(s32 param);
++	bool                    m_hd_optap_on = false;
++	void hd_draw_bg(bitmap_rgb32 &bitmap, const s60hd_blit &b, const s60hd_bg &bg, int W, int H);
 +	optional_device<screen_device> m_hdscreen;
 +	int                     m_hd_sx = 0, m_hd_sy = 0;
 +	std::shared_ptr<s60hd_list> m_hd_pending, m_hd_shown, m_hd_cur, m_hd_done_list;
@@ -217,7 +236,7 @@
  	uint16_t *              m_adsp_pgm_memory_word = 0;
  
  	uint16_t *              m_ds3_sdata_memory = 0;
-@@ -676,7 +704,7 @@
+@@ -676,7 +716,7 @@
  protected:
  	virtual void device_add_mconfig(machine_config &config) override ATTR_COLD;
  	virtual void device_start() override ATTR_COLD;
@@ -245,17 +264,19 @@
  uint16_t harddriv_state::hd68k_port0_r()
 --- a/src/mame/atari/harddriv_v.cpp
 +++ b/src/mame/atari/harddriv_v.cpp
-@@ -9,6 +9,9 @@
+@@ -9,6 +9,11 @@
  #include "emu.h"
  #include "cpu/tms34010/tms34010.h"
  #include "harddriv.h"
 +#include "render.h"
 +
 +#include <chrono>
++#include <filesystem>
++#include <fstream>
  
  
  
-@@ -450,7 +453,320 @@
+@@ -450,7 +455,490 @@
  			color = vram_base[coloridx >> 1];
  		dest[x] = m_gfx_palettebank * 256 + color;
  	}
@@ -320,13 +341,78 @@
 +			[this] (offs_t offset, u16 &data, u16 mem_mask)
 +			{
 +				if (data)
++				{
 +					hd_parse_list();
++					if (!m_hd_optap_on && !m_hd_bgs.empty())
++					{
++						m_hd_optap_on = true;
++						machine().scheduler().synchronize(timer_expired_delegate(FUNC(harddriv_state::hd_install_optap), this));
++					}
++				}
 +				else if (m_hd_pending)
 +				{
 +					m_hd_shown = std::move(m_hd_pending);
 +					m_hd_pending.reset();
 +				}
 +			});
++	hd_load_pack();
++}
++
++// Record display-list op 8 blits. Installed once the game runs (a tap installed in device_start is lost when the
++// driver later remaps the GSP RAM), from the scheduler (not from inside another tap).
++void harddriv_state::hd_install_optap(s32 param)
++{
++	address_space &gsp = m_gsp->space(AS_PROGRAM);
++	// the display-list walker reads its jump table (FFF470E0, one long per opcode) with the command word in
++	// A4 and the argument pointer in A5: record op 8 (bitmap blit: x, y, flags, address hi, lo)
++	m_hd_optap = gsp.install_read_tap(0xfff470e0, 0xfff472df, "s60hdop",
++				[this] (offs_t offset, u16 &data, u16 mem_mask)
++				{
++					if (offset != 0xfff470e0 + 8 * 32)
++						return;
++					const uint32_t a4 = m_gsp->state_int(TMS34010_A4), a5 = m_gsp->state_int(TMS34010_A5);
++					if (((a4 >> 12) & 15) != 8 || m_hd_blits_cur.size() >= 64)
++						return;
++					address_space &sp = m_gsp->space(AS_PROGRAM);
++					s60hd_blit b;
++					b.x = int16_t(sp.read_word(a5)); b.y = int16_t(sp.read_word(a5 + 16));
++					b.flags = sp.read_word(a5 + 32);
++					b.addr = (uint32_t(sp.read_word(a5 + 48)) << 16) | sp.read_word(a5 + 64);
++					b.w = b.h = 0; b.key = 0;
++					m_hd_blits_cur.push_back(b);
++				});
++	m_hd_optap_on = true;
++	std::fprintf(stderr, "stun60: HD background blit recorder on\n");
++}
++
++// Load the HD background pack: every .s60bg file in $STUN60_HDPACK made for this SX x SY.
++void harddriv_state::hd_load_pack()
++{
++	const char *dir = std::getenv("STUN60_HDPACK");
++	if (!dir || !*dir)
++		return;
++	std::error_code ec;
++	for (const auto &e : std::filesystem::directory_iterator(dir, ec))
++	{
++		if (e.path().extension() != ".s60bg")
++			continue;
++		std::ifstream f(e.path(), std::ios::binary);
++		char magic[8]; uint32_t key; uint16_t w, h, sx, sy;
++		if (!f.read(magic, 8) || std::memcmp(magic, "S60BG01", 8)) continue;
++		f.read(reinterpret_cast<char *>(&key), 4); f.read(reinterpret_cast<char *>(&w), 2); f.read(reinterpret_cast<char *>(&h), 2);
++		f.read(reinterpret_cast<char *>(&sx), 2); f.read(reinterpret_cast<char *>(&sy), 2);
++		if (!f || sx != m_hd_sx || sy != m_hd_sy || !w || !h || w > 1024 || h > 512) continue;
++		s60hd_bg bg;
++		bg.w = w; bg.h = h;
++		f.read(reinterpret_cast<char *>(bg.ref), 48);
++		const size_t n = size_t(w) * sx * h * sy;
++		bg.rgb.resize(n); bg.pen.resize(n);
++		f.read(reinterpret_cast<char *>(bg.rgb.data()), n * 4);
++		f.read(reinterpret_cast<char *>(bg.pen.data()), n);
++		if (!f) continue;
++		m_hd_bgs[key] = std::move(bg);
++	}
++	std::fprintf(stderr, "stun60: HD background pack %s: %d images\n", dir, int(m_hd_bgs.size()));
 +}
 +
 +// Parse the list the GSP just drew (its address is at FFF77F30/40) into polygons.
@@ -400,6 +486,27 @@
 +		}
 +		break;
 +	}
++	// bitmap blits drawn with this list: identify each image by a hash of its pens in GSP RAM (FNV-1a, as the pack)
++	for (s60hd_blit &b : m_hd_blits_cur)
++	{
++		if (b.addr < 0xff800000) continue;
++		const uint32_t len = m_gsp_vram.length();                   // power of two; the RAM is mirrored above it
++		const uint32_t hdr = (b.addr >> 4) & (len - 1);
++		if (hdr + 6 >= len) continue;
++		b.h = m_gsp_vram[hdr]; b.w = m_gsp_vram[hdr + 1];
++		const uint32_t words = (uint32_t(b.w) * b.h + 1) / 2;
++		if (!b.w || !b.h || hdr + 6 + words > len) continue;
++		uint32_t k = 2166136261u;
++		const uint16_t *px = &m_gsp_vram[hdr + 6];
++		for (uint32_t i = 0; i < words; i++)
++		{
++			k = (k ^ (px[i] & 0xff)) * 16777619u;
++			k = (k ^ (px[i] >> 8)) * 16777619u;
++		}
++		b.key = k;
++		list->blits.push_back(b);
++	}
++	m_hd_blits_cur.clear();
 +	m_hd_pending = std::move(list);
 +}
 +
@@ -498,13 +605,29 @@
 +			std::memcpy(&bitmap.pix(r * SY + yy), d0, W * SX * sizeof(uint32_t));
 +	}
 +
++	// 2b. backgrounds from the HD pack, where the low-res frame really shows them
++	if (list)
++		for (const s60hd_blit &b : list->blits)
++		{
++			auto it = m_hd_bgs.find(b.key);
++			if (it != m_hd_bgs.end() && it->second.w == b.w && it->second.h == b.h)
++			{
++				hd_draw_bg(bitmap, b, it->second, W, H);
++			}
++		}
++
 +	auto t1 = std::chrono::steady_clock::now();
 +	if (std::getenv("STUN60_HDDEBUG") && (m_hd_frames % 300) == 0)
 +	{
 +		int c[3] = { 0, 0, 0 };
 +		for (int i = 0; i < W * PLAY; i++) c[m_hd_cls[i]]++;
-+		std::fprintf(stderr, "stun60 HD: frame %u lists %u polys %d playfield px: bg %d 3d %d over %d\n",
-+				m_hd_frames, m_hd_lists, list ? int(list->polys.size()) : -1, c[0], c[1], c[2]);
++		std::fprintf(stderr, "stun60 HD: frame %u lists %u polys %d playfield px: bg %d 3d %d over %d; blits %d, HD bg px %u\n",
++				m_hd_frames, m_hd_lists, list ? int(list->polys.size()) : -1, c[0], c[1], c[2],
++				list ? int(list->blits.size()) : -1, m_hd_bg_drawn);
++		if (list)
++			for (const s60hd_blit &b : list->blits)
++				std::fprintf(stderr, "   blit x %d y %d fl %04X addr %08X %dx%d key %08X %s\n", b.x, b.y, b.flags, b.addr, b.w, b.h, b.key,
++						m_hd_bgs.count(b.key) ? "HD" : "-");
 +	}
 +
 +	// 3. the polygons at full resolution, in list order (later ones on top)
@@ -573,6 +696,74 @@
 +		{
 +			std::fprintf(stderr, "stun60 HD timing: classify+scale %.2f ms, polygons %.2f ms per frame\n", t_sum[0] / t_n, t_sum[1] / t_n);
 +			t_sum[0] = t_sum[1] = 0; t_n = 0;
++		}
++	}
++}
++
++// Draw one HD background image at its blit position. An HD pixel is used where the low-res frame shows this image's pen
++// at that pixel (so the HUD, text and anything else drawn later stay), or where a 3D polygon covers it (the polygon pass
++// draws over it; this only shows at the HD polygon edges). Colours follow the live palette: the upscaled colour is
++// scaled by live / reference for its pen, so fades and colour cycling still work.
++void harddriv_state::hd_draw_bg(bitmap_rgb32 &bitmap, const s60hd_blit &b, const s60hd_bg &bg, int W, int H)
++{
++	const int SX = m_hd_sx, SY = m_hd_sy, bank = m_gfx_palettebank * 256;
++	const bool transp = b.flags & 0x20;
++	const rgb_t *pens = m_palette->palette()->entry_list_adjusted();
++	const int npens = m_palette->entries();
++	int fac[16][3]; bool same = true;
++	for (int i = 0; i < 16; i++)
++	{
++		const int v = bank + 240 + i;
++		const rgb_t live = pens[v < npens ? v : 0];
++		const int l[3] = { live.r(), live.g(), live.b() };
++		for (int c = 0; c < 3; c++)
++		{
++			const int r = bg.ref[i][c];
++			fac[i][c] = r ? (l[c] << 8) / r : -l[c] - 1;     // negative = reference was 0: use the live value
++			if (l[c] != r) same = false;
++		}
++	}
++	// the game's blit puts an image that starts left of the screen (x < 0) one line lower (measured: 100% match)
++	const int IW = bg.w * SX, top = b.y - 0x28 + (b.x < 0 ? 1 : 0);
++	const int r0 = std::max(top, 0), r1 = std::min(top + int(bg.h), H) - 1;
++	const int lx0 = std::max<int>(b.x, 0), lx1 = std::min<int>(b.x + bg.w, W) - 1;
++	if (r1 < r0 || lx1 < lx0) return;
++	for (int r = r0; r <= r1; r++)
++	{
++		const uint16_t *src = &m_hd_done[r * 512];
++		const uint8_t *cls = &m_hd_cls[r * W];
++		for (int yy = 0; yy < SY; yy++)
++		{
++			const int Y = r * SY + yy, iy = (r - top) * SY + yy;
++			uint32_t *d = &bitmap.pix(Y);
++			const uint32_t *srow = &bg.rgb[size_t(iy) * IW];
++			const uint8_t *prow = &bg.pen[size_t(iy) * IW];
++			for (int lx = lx0; lx <= lx1; lx++)
++			{
++				const int c = cls[lx];
++				if (c == 2) continue;
++				const int ix0 = (lx - b.x) * SX;
++				const uint8_t p = prow[ix0];            // the low-res pen of the image at this pixel
++				if (transp && p == 0) continue;
++				if (c == 0 && (src[lx] & 0xff) != p) continue;     // something else is on screen here
++				for (int xx = 0; xx < SX; xx++)
++				{
++					uint32_t v = srow[ix0 + xx];
++					if (!same)
++					{
++						const int pi = prow[ix0 + xx] - 240;
++						if (pi >= 0 && pi < 16)
++						{
++							int ch[3] = { int((v >> 16) & 0xff), int((v >> 8) & 0xff), int(v & 0xff) };
++							for (int k = 0; k < 3; k++)
++								ch[k] = fac[pi][k] >= 0 ? std::min(255, (ch[k] * fac[pi][k]) >> 8) : -fac[pi][k] - 1;
++							v = (ch[0] << 16) | (ch[1] << 8) | ch[2];
++						}
++					}
++					d[lx * SX + xx] = v | 0xff000000;
++				}
++				m_hd_bg_drawn += SX;
++			}
 +		}
 +	}
 +}

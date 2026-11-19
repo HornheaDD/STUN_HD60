@@ -20,6 +20,7 @@ MAIN = [("136070-2102.200r", "136070-2101.210r"), ("136070-6104.200s", "136070-6
         ("136070-6106.200t", "136070-6105.210t"), ("136070-2108.200u", "136070-2107.210u"),
         ("136070-2110.200v", "136070-2109.210v"), ("136070-2112.200w", "136070-2111.210w")]
 TABLE = 0xBFE00
+PALTAB = 0x48068   # image n's palette: pointer at PALTAB + 4n -> 16 RGB triplets for pens 240-255 (0 = none)
 
 def load_main(zpath):
     z = zipfile.ZipFile(zpath); names = {os.path.basename(n): n for n in z.namelist()}
@@ -59,6 +60,12 @@ def images(buf):
         res.append((o, w, h, hdr, bytes(buf[o + 12:o + 12 + w * h]))); o += 12 + w * h
     return res, o
 
+def palette(rom, n):
+    """16 (r, g, b) colours for pens 240-255 of image stream n, or None."""
+    p = struct.unpack_from(">I", rom, PALTAB + 4 * n)[0]
+    if p == 0 or p + 48 > len(rom): return None
+    return [tuple(rom[p + 3 * i:p + 3 * i + 3]) for i in range(16)]
+
 def streams(rom):
     """Yield (number, address) for each distinct stream; entry 0 is unused (the game's image number starts at 1)."""
     seen = set()
@@ -70,6 +77,7 @@ def streams(rom):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("zip"); ap.add_argument("outdir")
+    ap.add_argument("--png", action="store_true", help="also write PNGs (images whose pens are all 240-255)")
     args = ap.parse_args()
     rom = load_main(args.zip); os.makedirs(args.outdir, exist_ok=True)
     for n, p in streams(rom):
@@ -77,7 +85,11 @@ if __name__ == "__main__":
         print("stream %2d at %06X: %6d bytes, %d image(s)%s" % (n, p, len(buf), len(ims),
               "" if used == len(buf) else ", %d bytes left over" % (len(buf) - used)))
         for i, (o, w, h, hdr, px) in enumerate(ims):
-            with open(os.path.join(args.outdir, "s%02d_%d_%dx%d.raw" % (n, i, w, h)), "wb") as f:
-                f.write(struct.pack("<HH", w, h) + px)
+            base = os.path.join(args.outdir, "s%02d_%d_%dx%d" % (n, i, w, h))
+            with open(base + ".raw", "wb") as f: f.write(struct.pack("<HH", w, h) + px)
+            pal = palette(rom, n)
+            if pal and min(px) >= 240 and args.png:
+                from PIL import Image
+                im = Image.new("RGB", (w, h)); im.putdata([pal[v - 240] for v in px]); im.save(base + ".png")
             print("   image %d: offset %05X (GSP %08X) %dx%d header %s" % (i, o, 0xFFE00000 + o * 8, w, h,
                   " ".join("%04X" % v for v in hdr)))

@@ -475,3 +475,22 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - Output is pens only. Still open: per-level palettes (op 9 data in the 68010 ROM) to turn pens into RGB without running the
   game; then upscale (pick an upscaler), then draw the HD skyline in hd_compose (blit position from the op 8 args).
 - ROM-derived output never goes in git (re-probes/bg/out/ is ignored; extractor output goes outside the repo).
+
+## HD backgrounds, step 2 DONE (2026-11-19): gameplay skylines in HD, live
+- Palettes: image stream n's 16 colours (pens 240-255) = RGB triplets at ptr[$48068 + 4n] (68010 ROM; same index as $BFE00).
+  Level base palettes (256 RGB, 0x300 bytes) at ptr[$47406 + 4*level] (routine 0296AA merges them, with fades). Between-level
+  city screens (streams 4-14, 512x96) also use pens 6-31 from the level palette (window lights cycle there): NOT done yet,
+  level<->image mapping unresolved. Gameplay skylines (all pens >= 240) are exact: s06 city night, s16 canyon, s17 forest,
+  s18 green hills, s20 plain, s21 golden hills, s22 farmland, s23 galaxy (3 images).
+- hdpack/build_pack.py zip pack [--keep-png]: unpack, pad 16 px with the cyclic neighbour half (no seams), Real-ESRGAN
+  realesrgan-x4plus (user's pick, sample sheet hdpack/samples/), Lanczos to 3x5, write .s60bg (format in the script) with a
+  per-HD-pixel pen map for live re-tinting. ~50 s on the GTX 1070, 14 images, 38 MB. Real-ESRGAN = official
+  realesrgan-ncnn-vulkan 20220424 ubuntu zip in build/tools/realesrgan (not in git). Local pack: hdpack/pack (ignored).
+- Driver (harddriv_v.cpp): STUN60_HDPACK=dir loads the pack (key = FNV-1a of the low-res pens). A GSP read tap on the
+  display-list jump table (FFF470E0, op 8 entry FFF471E0; A4 = command, A5 = args) records blits per drawn list; it must be
+  installed after start (scheduler synchronize from the first draw-done; taps from device_start get dropped). GSP RAM is
+  mirrored: index = (addr >> 4) & (len - 1). hd_draw_bg runs after the scale-up, before polygons: an HD pixel is used where
+  the low-res pixel shows the image's pen (HUD/overlays stay) or is 3D; colour = upscaled * live/ref per pen (fades work).
+  Game quirk: a blit starting at x < 0 lands one line lower (measured 100%), reproduced.
+- Tests: verify 4012/4012 to level 4 with the pack in view, 3D gameplay 58.7 fps (58.5 without); HD off 677/677.
+  run-stun60.sh sets STUN60_HDPACK=~/mame/hdpack/pack when that folder exists.
