@@ -600,3 +600,6 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - Tests: Labyrinth (re-probes/gate/gate_test.lua, AY=255): gates at ~frame 1133 (level start) and ~2267, cadence
   exactly 2 jobs, verify 1216/1216 exact, 57.25 fps morph on = off; normal verify 1792/1792, 58.0 fps.
   Comparison (3x slow motion): hd-experiment/live-hd/gate-morph-compare.gif (local, not committed).
+- **Released as hd-v1.2 (2026-11-19):** script-only change, binaries = v1.1; new script copied into the AppDir and
+  out-hd/STUNRunnerHD60-windows/bin, README-HD.txt notes the gate morph; archives rebuilt as for v1.1 (v1.1 files in
+  package/out-hd-v1.1/). AppImage + Wine smoke tests: gate morph on, 60 fps / 20 ticks.

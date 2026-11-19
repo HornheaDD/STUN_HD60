@@ -31,5 +31,6 @@ hdpack/samples/
 hdpack/pack*/
 package/out-hd/
 package/out-hd-v1.0/
+package/out-hd-v1.1/
 package/STUNRunnerHD60.AppDir/usr/
 package/win/STUNRunnerHD60.exe
