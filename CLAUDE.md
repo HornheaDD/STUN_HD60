@@ -19,11 +19,10 @@ the Windows package works on a real Windows PC and played the morph build live (
   reaches the bird at ~frame 8490).
 - Shell gotcha: `pgrep -f X` / `ps | grep X` wait loops match their own bash command line if it contains X. Use a pattern
   that only the MAME process line has, or wait on a PID.
-- **HD anti-aliasing DONE (2026-11-20), local commit, not released** (see "HD anti-aliasing" at the end). Next: #1 HD sprites
-  (bit-12 polys), then release both as hd-v1.4 (binaries change: rebuild Linux + Windows packages like hd-v1.1).
-  Note: the dev binary build/mame-mame0285/stun60 (= the user's launcher) now has AA on; v1.3 binary kept as build/stun60.v13-binary.
-- Other candidate work (ask the user): HD for GSP flag-bit-12 polygons (alt handler FFF48FC0, scaled 2D sprites such as
-  the red arrows and the 162..16B sprite flipbooks), HD course map and title screens, widescreen 16:9 probe.
+- **HD anti-aliasing + HD sprites DONE (2026-11-20), local commits, not released** (see "HD anti-aliasing" and "HD sprites"
+  at the end). Next: user plays live, then release as hd-v1.4 (binaries change: rebuild Linux + Windows packages like hd-v1.1).
+  Note: the dev binary build/mame-mame0285/stun60 (= the user's launcher) has both; v1.3 binary kept as build/stun60.v13-binary.
+- Other candidate work (ask the user): HD course map and title screens, HD HUD text, widescreen 16:9 probe.
 - Release recipe for HD60: see "HD packages built and RELEASED" and the hd-v1.1/hd-v1.2 notes at the end.
 
 ## Earlier pause (2026-11-18, evening), history
@@ -671,3 +670,22 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - Cost (3 concurrent test emulators, so pessimistic): polygon pass 1-1.9 ms (AA off) vs 2-3.5 ms (AA 2x2, 4 threads).
   Unthrottled speed with HD always on: v1.3 ~134%, AA off 151%, AA 2x2 127%. Verify 1815/1815 both, same fps/ticks.
 - Images: scripts/re-probes/flip/out/aa-zoom.png (before/after tunnel edges, ignored folder).
+
+## HD sprites (2026-11-20): flag-bit-12 records = scaled sprite blits, redrawn from the source image, local commit only
+- GSP FFF48FC0 (disassembly: re-probes/sprite/dasm_alt.lua -> out/gsp_alt_full.asm, ignored): record words x0, y0, x1, ya, -, y1;
+  sprite number = flags & 0x3F -> 32-bit pointer table FFF78150 (bit address + 32 * n); sprite = height, width, 4 more words,
+  then width x height 8-bit pens (same header as the background images), pen 0 transparent (CONTROL E0h: T + window clip).
+  Checks (skip when failed): x0 < 0x200, y0 < 0x118, width < 0x15E and height < 0xC8 unless list flags (FFF77E60) bit 4,
+  y1 >= 0x28. Stepping: step = (src << 16) / dst (16.16); pixel k shows source k * int + floor((k + 1) * frac), rows alike;
+  drawn from (x0, y0) for (y1 - ya + 1) rows.
+- **The red arrow / star track markings are NOT sprites** (ordinary polygons; the AA covers them). Sprites seen on both courses
+  (STUN60_HDSPRDUMP=dir saves each once as PPM; STUN60_HDSPRLOG=1 logs every 60th list): 03..0C = 10-frame 32x32 impact-spark
+  flipbook (very common, shown ~10x10 low-res), 02 = attract story panel 360x168 at FFE00000 (zooms in, then 363x170).
+  So the 162..16B model ids of the morph survey are these sprite quads.
+- Driver: s60hd_poly.sprite + rect + steps + copied pens (hd_parse_list). Step 1 rasterizes them with the exact GSP stepping
+  into m_hd_exp (classification then counts them as 3D: "over" 0 on the panel when the INSERT COIN text is off). Step 3: HD
+  pixel takes source floor(u * step) (u = position in low-res pixels from the rectangle's corner; the GSP sample lies in
+  [k*step, (k+1)*step], so this is the unbiased version; centre / left-edge variants were 0.4 / 0.8 px too high, measured by
+  shift search against v1.3). With AA the whole rectangle is marked as edge pixels (outline + shrunk detail anti-aliased).
+- Tests: verify 1815/1815, drawn 54.4, speed 127% (= AA build). Images: re-probes/flip/out/spr-zoom.png (spark),
+  re-probes/sprite/out/panel-zoom.png, sprites-sheet.png (all ignored, ROM-derived).

@@ -191,7 +191,7 @@
  #include "machine/timer.h"
  
  #include "sound/dac.h"
-@@ -384,6 +386,69 @@
+@@ -384,6 +386,73 @@
  
  	required_region_ptr<uint16_t> m_sim_memory;
  	uint16_t                m_som_memory[0x8000/2]{};
@@ -208,7 +208,11 @@
 +	// outline = drawn as a wireframe by the GSP (mode 3, or every polygon when list flag bit 3 is set): the corner
 +	// points of the left/right edges (row offset from y0, x as the game computes it (integer) and exact (float))
 +	struct s60hd_poly { uint16_t flags; uint8_t pen; int y0; std::vector<int64_t> l, r;
-+		uint8_t outline = 0, left_only = 0; std::vector<int> vy, lxi, rxi; std::vector<double> lxf, rxf; };
++		uint8_t outline = 0, left_only = 0; std::vector<int> vy, lxi, rxi; std::vector<double> lxf, rxf;
++		// flag bit 12: scaled sprite (GSP FFF48FC0): source image srcw x srch pens (0 = transparent) stretched over the
++		// screen rectangle dx0.., dy0.. (list y) of dw x dh pixels with 16.16 steps hstep / vstep
++		uint8_t sprite = 0; int dx0 = 0, dy0 = 0, dw = 0, dh = 0; uint16_t srcw = 0, srch = 0; uint32_t hstep = 0, vstep = 0;
++		std::vector<uint8_t> spix; };
 +	struct s60hd_blit { int16_t x, y; uint16_t flags; uint32_t addr; uint16_t w, h; uint32_t key; };
 +	struct s60hd_list { std::vector<s60hd_poly> polys; std::vector<s60hd_blit> blits; uint16_t gflags = 0; };
 +	// HD background pack (env STUN60_HDPACK = folder of .s60bg files made by hdpack/build_pack.py)
@@ -261,7 +265,7 @@
  	uint16_t *              m_adsp_pgm_memory_word = 0;
  
  	uint16_t *              m_ds3_sdata_memory = 0;
-@@ -676,7 +741,7 @@
+@@ -676,7 +745,7 @@
  protected:
  	virtual void device_add_mconfig(machine_config &config) override ATTR_COLD;
  	virtual void device_start() override ATTR_COLD;
@@ -289,7 +293,7 @@
  uint16_t harddriv_state::hd68k_port0_r()
 --- a/src/mame/atari/harddriv_v.cpp
 +++ b/src/mame/atari/harddriv_v.cpp
-@@ -9,6 +9,22 @@
+@@ -9,6 +9,23 @@
  #include "emu.h"
  #include "cpu/tms34010/tms34010.h"
  #include "harddriv.h"
@@ -303,6 +307,7 @@
 +#include <cmath>
 +#include <filesystem>
 +#include <fstream>
++#include <set>
 +#include <thread>
 +#if defined(_WIN32)
 +#include <windows.h>
@@ -312,7 +317,7 @@
  
  
  
-@@ -450,7 +466,1179 @@
+@@ -450,7 +467,1319 @@
  			color = vram_base[coloridx >> 1];
  		dest[x] = m_gfx_palettebank * 256 + color;
  	}
@@ -531,8 +536,65 @@
 +		{
 +			uint32_t a = base + off * 16;
 +			const uint16_t f = w(a); a += 16;
-+			if (f & 0x9000)             // bit 15 = skip, bit 12 = alternate handler (not decoded): leave to the low-res image
++			if (f & 0x8000)             // bit 15 = skip
 +				continue;
++			if (f & 0x1000)
++			{
++				// scaled sprite (GSP FFF48FC0): words x0, y0, x1, ya, -, y1; sprite f & 0x3F -> pointer table FFF78150;
++				// sprite = height, width, 4 more words, then width x height 8-bit pens (pen 0 transparent). The GSP skips
++				// it when the rectangle is off limits (sizes are unlimited with list flag bit 4).
++				const int x0 = int16_t(w(a)), y0 = int16_t(w(a + 16)), x1 = int16_t(w(a + 32)), ya = int16_t(w(a + 48)), y1 = int16_t(w(a + 80));
++				const uint32_t te = 0xfff78150 + 32 * (f & 0x3f);
++				const uint32_t sp = w(te) | (uint32_t(w(te + 16)) << 16);
++				const int dw = x1 - x0 + 1, dh = y1 - ya + 1;
++				const bool big = list->gflags & 0x10;
++				if (!sp || x0 >= 0x200 || y0 >= 0x118 || x1 < 0 || dw <= 0 || (!big && dw >= 0x15e) || y1 < 0x28 || dh <= 0 || (!big && dh >= 0xc8))
++					continue;
++				s60hd_poly poly;
++				poly.flags = f; poly.sprite = 1;
++				poly.dx0 = x0; poly.dy0 = y0; poly.dw = dw; poly.dh = dh;
++				poly.srch = w(sp); poly.srcw = w(sp + 16);
++				if (!poly.srcw || !poly.srch || poly.srcw > 1024 || poly.srch > 1024)
++					continue;
++				poly.hstep = (uint32_t(poly.srcw) << 16) / uint32_t(dw);
++				poly.vstep = (uint32_t(poly.srch) << 16) / uint32_t(dh);
++				const uint32_t n = uint32_t(poly.srcw) * poly.srch;
++				poly.spix.resize(n);
++				const uint32_t px = sp + 0x60;
++				for (uint32_t i = 0; i < n; i += 2)
++				{
++					const uint16_t v = w(px + 8 * i);
++					poly.spix[i] = v & 0xff;
++					if (i + 1 < n) poly.spix[i + 1] = v >> 8;
++				}
++				if (const char *dir = std::getenv("STUN60_HDSPRDUMP"))
++				{
++					// debug: save each sprite image once as a PPM (live palette, pen 0 = magenta)
++					static std::set<uint32_t> done;
++					if (done.insert(sp ^ (uint32_t(f & 0x3f) << 26)).second)
++					{
++						const rgb_t *pens = m_palette->palette()->entry_list_adjusted();
++						char fn[512];
++						std::snprintf(fn, sizeof(fn), "%s/spr_%02X_%08X_%dx%d.ppm", dir, f & 0x3f, sp, poly.srcw, poly.srch);
++						if (FILE *o = std::fopen(fn, "wb"))
++						{
++							std::fprintf(o, "P6\n%d %d\n255\n", poly.srcw, poly.srch);
++							for (uint8_t pen : poly.spix)
++							{
++								const rgb_t c = pen ? pens[m_gfx_palettebank * 256 + pen] : rgb_t(255, 0, 255);
++								const uint8_t b3[3] = { c.r(), c.g(), c.b() };
++								std::fwrite(b3, 1, 3, o);
++							}
++							std::fclose(o);
++						}
++					}
++				}
++				if (std::getenv("STUN60_HDSPRLOG") && (m_hd_lists % 60) == 0)
++					std::fprintf(stderr, "stun60 sprite: list %u flags %04X x %d..%d y %d (%d) h %d  src %dx%d @%08X\n", m_hd_lists, f, x0, x1, y0, ya, dh,
++							poly.srcw, poly.srch, sp);
++				list->polys.push_back(std::move(poly));
++				continue;
++			}
 +			s60hd_poly poly;
 +			poly.flags = f;
 +			poly.pen = w(0xfff71d20 + 16 * (f & 0x3ff)) & 0xff;
@@ -688,6 +750,28 @@
 +	if (list)
 +		for (const s60hd_poly &p : list->polys)
 +		{
++			if (p.sprite)
++			{
++				// GSP stepping: source column of pixel k = k * int + floor((k + 1) * frac), rows the same way
++				for (int j = 0; j < p.dh; j++)
++				{
++					const int r = p.dy0 + j - 0x28;
++					if (r < 0 || r >= PLAY) continue;
++					const uint32_t sy = j * (p.vstep >> 16) + (((j + 1) * uint64_t(p.vstep & 0xffff)) >> 16);
++					const uint8_t *src = &p.spix[std::min<uint32_t>(sy, p.srch - 1) * p.srcw];
++					for (int k = 0; k < p.dw; k++)
++					{
++						const int x = p.dx0 + k;
++						if (x < 0 || x >= W) continue;
++						const uint32_t sx = k * (p.hstep >> 16) + (((k + 1) * uint64_t(p.hstep & 0xffff)) >> 16);
++						const uint8_t pen = src[std::min<uint32_t>(sx, p.srcw - 1)];
++						if (!pen) continue;
++						m_hd_exp[r * W + x] = pen;
++						m_hd_wpen[r * W + x] = 0; m_hd_wcnt[r * W + x] = 0;
++					}
++				}
++				continue;
++			}
 +			if (p.outline)
 +			{
 +				const size_t k = p.vy.size() - 1;
@@ -952,6 +1036,23 @@
 +				if (k)
 +					hline(p.lxf[k], p.y0 + p.vy[k], p.rxf[k], p.y0 + p.vy[k], col, s);
 +			};
++			// sprite pen at a position inside its rectangle (u, v in low-res pixels from its top left corner):
++			// source = u * step. The GSP gives pixel k the source column k * step + frac(step), which always lies in
++			// [k * step, (k + 1) * step], so this is the same picture without the GSP's rounding (finer when shrunk)
++			auto spen = [] (const s60hd_poly &p, double u, double v) -> uint8_t
++			{
++				const int sx = std::clamp(int(std::floor(u * (p.hstep / 65536.0))), 0, p.srcw - 1);
++				const int sy = std::clamp(int(std::floor(v * (p.vstep / 65536.0))), 0, p.srch - 1);
++				return p.spix[sy * p.srcw + sx];
++			};
++			// HD rows / columns of sprite p inside this band
++			auto srect = [&] (const s60hd_poly &p, int &Ya, int &Yb, int &Xa, int &Xb)
++			{
++				Ya = std::max(std::max(p.dy0 - 0x28, 0) * SY, yb0);
++				Yb = std::min(std::min(p.dy0 - 0x28 + p.dh, PLAY) * SY, yb1);
++				Xa = std::max(p.dx0, 0) * SX;
++				Xb = std::min(p.dx0 + p.dw, W) * SX - 1;
++			};
 +			// HD rows of polygon p inside this band
 +			auto rows = [&] (const s60hd_poly &p, int &Ya, int &Yb)
 +			{
@@ -964,6 +1065,24 @@
 +			for (const s60hd_poly &p : list->polys)
 +			{
 +				if (p.outline) { outline(p, 1); continue; }
++				if (p.sprite)
++				{
++					int Ya, Yb, Xa, Xb; srect(p, Ya, Yb, Xa, Xb);
++					for (int Y = Ya; Y < Yb; Y++)
++					{
++						if (aa) mark(Y, Xa, Xb);           // the whole rectangle (transparent pixels give the outline)
++						const double v = (Y + 0.5) / SY - (p.dy0 - 0x28);
++						const uint8_t *cls = &m_hd_cls[(Y / SY) * W];
++						uint32_t *d = &bitmap.pix(Y);
++						for (int X = Xa; X <= Xb; X++)
++						{
++							if (cls[X / SX] == 2) continue;
++							const uint8_t pen = spen(p, (X + 0.5) / SX - p.dx0, v);
++							if (pen) d[X] = pc(bank + pen);
++						}
++					}
++					continue;
++				}
 +				const int pat = pattern(p.flags);
 +				const uint32_t col = pc(bank + p.pen);
 +				int Ya, Yb; rows(p, Ya, Yb);
@@ -1030,6 +1149,32 @@
 +			for (const s60hd_poly &p : list->polys)
 +			{
 +				if (p.outline) { outline(p, A); continue; }
++				if (p.sprite)
++				{
++					int Ya, Yb, Xa, Xb; srect(p, Ya, Yb, Xa, Xb);
++					for (int Y = Ya; Y < Yb; Y++)
++					{
++						const uint32_t *e0 = &elist[0];
++						const uint32_t *eb = e0 + rowstart[Y - yb0], *ee = e0 + rowstart[Y - yb0 + 1];
++						const uint8_t *cls = &m_hd_cls[(Y / SY) * W];
++						for (const uint32_t *it = std::lower_bound(eb, ee, uint32_t(Y) * HW + Xa); it != ee && int(*it - uint32_t(Y) * HW) <= Xb; ++it)
++						{
++							const int x = int(*it - uint32_t(Y) * HW);
++							if (cls[x / SX] == 2) continue;
++							uint32_t *sm = &bs.ss[size_t(it - e0) * AA];
++							for (int k = 0; k < A; k++)
++							{
++								const double v = (Y + (k + 0.5) / A) / SY - (p.dy0 - 0x28);
++								for (int j = 0; j < A; j++)
++								{
++									const uint8_t pen = spen(p, (x + (j + 0.5) / A) / SX - p.dx0, v);
++									if (pen) sm[k * A + j] = pc(bank + pen);
++								}
++							}
++						}
++					}
++					continue;
++				}
 +				const int pat = pattern(p.flags);
 +				const uint32_t col = pc(bank + p.pen);
 +				int Ya, Yb; rows(p, Ya, Yb);

@@ -64,8 +64,7 @@ Controls and tips
     STUN60_MORPH=0 turns this off.
   - It needs a reasonably fast CPU: roughly an Intel 8th-gen quad-core laptop chip or better.
     The HD redraw adds about 2-3 ms of CPU time per frame while the HD picture is shown.
-  - The full-screen course map between levels and a few flat 2D objects on the track (such as the
-    red arrow markings) are not upscaled yet (original pixels, scaled).
+  - The full-screen course map between levels is not upscaled yet (original pixels, scaled).
   - STUN60_HDLINE sets the width of the HD wireframe lines in HD pixels (default 2).
   - The HD polygon edges are smoothed (anti-aliased). On a slow PC, STUN60_HDAA=1 turns this off
     and saves some CPU time.

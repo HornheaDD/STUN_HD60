@@ -28,6 +28,7 @@ scripts/re-probes/bg/*.bin
 scripts/re-probes/bg/out/
 scripts/re-probes/wf/out/
 scripts/re-probes/flip/out/
+scripts/re-probes/sprite/out/
 hdpack/samples/
 hdpack/pack*/
 package/out-hd/
