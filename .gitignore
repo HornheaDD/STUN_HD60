@@ -27,6 +27,7 @@ scripts/re-probes/bg/*.asm
 scripts/re-probes/bg/*.bin
 scripts/re-probes/bg/out/
 scripts/re-probes/wf/out/
+scripts/re-probes/flip/out/
 hdpack/samples/
 hdpack/pack*/
 package/out-hd/

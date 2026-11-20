@@ -5,19 +5,23 @@ the older https://github.com/HornheaDD/STUN60 = 60 fps-only v1.0, frozen). Machi
 backups) are in ~/CLAUDE.md on the user's PC and must NOT be copied here. Paths below assume the repo is ~/mame.
 Build tree (not in git): ~/mame/build/mame-mame0285 = MAME 0.285 source + stun60-mame0285.patch. ROMs (not in git): ~/mame/roms.
 
-## PAUSED HERE (2026-11-19, night). Start with this section.
-State: STUN_HD60 release **hd-v1.2** is Latest (60 fps + HD redraw 3x5 + HD backgrounds via Real-ESRGAN on first launch +
-HD wireframe lines + gate morph). Repo clean and in sync with hd/main; packages in package/out-hd/ (v1.0/v1.1 copies in
-out-hd-v1.0/, out-hd-v1.1/). Verify baseline: normal course 1792/1792 exact, 58.0 fps; Labyrinth 1216/1216, 57.25 fps.
-Untracked local-only files (keep out of git): hd-experiment/live-hd/Screenshot_*.png, gate-morph-compare.gif,
-wireframe-*-compare.png, wireframe-full-zoom.png.
-- Waiting on: the user's report from a real Windows PC (HD60 package on the NAS; only tested under Wine so far).
-- Not requested yet, candidate next work (ask the user which):
-  - Smooth other flipbook animations (explosions, 167..16B, E4/E5, DC/DD...) with the gate-morph approach (needs the
-    model topology per animation checked; see "Tunnel gates" below).
-  - HD for GSP flag-bit-12 polygons (alt handler FFF48FC0: scaled 2D sprites, e.g. the red arrow markings), still low-res.
-  - HD course map and title screens (README "Planned").
-  - Widescreen 16:9 probe (README "Planned"; not started).
+## CURRENT STATE (2026-11-20). Start with this section.
+Released: STUN_HD60 **hd-v1.2** (60 fps + HD redraw 3x5 + HD backgrounds + HD wireframe + gate morph). User confirmed the
+Windows package works on a real Windows PC (2026-11-20).
+- **In progress: model morph** (generalised gate morph; see "Model morph" at the end). Script done + headless-verified,
+  committed locally, NOT pushed / not released. Next: user plays live (desktop launcher uses ~/mame/scripts directly), then
+  release as hd-v1.3 (script-only, same recipe as hd-v1.2; README + README-HD.txt mention the morphs).
+- Verify baseline with the new script: normal course 1774/1774, Advanced 1814/1814 and (fresh nvram, to frame 11000) 1891/1891.
+- Untracked local-only files (keep out of git): hd-experiment/live-hd/Screenshot_*.png, gate-morph-compare.gif,
+  wireframe-*-compare.png, wireframe-full-zoom.png.
+- **Headless test runs: always add `-cfg_directory D -nvram_directory D` (D = a scratch folder).** `-inipath ~/.mame` alone
+  makes them write the user's real ~/.mame/nvram/stunrun + cfg/stunrun.cfg (happened 2026-11-20; cfg showed chain="default"
+  afterwards, unclear whether that was the user's choice). Fresh nvram also makes runs deterministic (the Advanced run then
+  reaches the bird at ~frame 8490).
+- Shell gotcha: `pgrep -f X` / `ps | grep X` wait loops match their own bash command line if it contains X. Use a pattern
+  that only the MAME process line has, or wait on a PID.
+- Other candidate work (ask the user): HD for GSP flag-bit-12 polygons (alt handler FFF48FC0, scaled 2D sprites such as
+  the red arrows and the 162..16B sprite flipbooks), HD course map and title screens, widescreen 16:9 probe.
 - Release recipe for HD60: see "HD packages built and RELEASED" and the hd-v1.1/hd-v1.2 notes at the end.
 
 ## Earlier pause (2026-11-18, evening), history
@@ -619,3 +623,34 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - **Released as hd-v1.2 (2026-11-19):** script-only change, binaries = v1.1; new script copied into the AppDir and
   out-hd/STUNRunnerHD60-windows/bin, README-HD.txt notes the gate morph; archives rebuilt as for v1.1 (v1.1 files in
   package/out-hd-v1.1/). AppImage + Wine smoke tests: gate morph on, 60 fps / 20 ticks.
+
+## Model morph (2026-11-20): all smoothable flipbook models, local commit only
+- Survey (re-probes/flip/idsurvey.lua: per 68010 object A2, model id changes; seqs.py/cad.py summarise): animated ids
+  and cadence (game ticks per stage):
+  - E4/E5 = the player's shot (long thin triangles); E6 -> E8 -> EA -> EC = spark burst when a shot hits (1 tick each,
+    every course, very frequent). Shards are independent triangles flying outward; E8->EA is 1:1, E6 has 7 extra core
+    shards, EC shrinks them. Matched by direction from the centre.
+  - 124..129 (loop) = flapping bird enemy (wing beat, 5 ticks per pose), rigid panels.
+  - FB -> FC = star that grows once after a hit (1 tick), then rests at FC. 12A -> 12B <-> 12C (wobbles every tick)
+    -> 12D -> 12E = a drop that splashes; 12C->12D->12E change shape completely (not morphed).
+  - CC..D3 gates (2 ticks per stage, existing gate morph).
+  - Not morphable: 137..13A = colour chase (same geometry, colours rotate); 162..166 / 167..16B = bit-12 sprite quads
+    (only the sprite image changes); DC/DD = left/right street lamp (not an animation).
+- Model format corrected: header = n, nvert, nnorm (gates have 1 normal); then n entries (vertices, then normals,
+  |normal| ~16384), face normal index = 1-based into all entries. Largest ROM model: 269 entries / 132 faces.
+- Offline tools: re-probes/flip/dumpsim.lua (user1 -> out/user1.bin, ignored), model.py (decoder), draw.py (3-view render),
+  morph.py (Python prototype of the matcher; renders in-between sheets out/morph-*.png).
+- Script "Model morph" block (replaces the gate morph; prev script = stunrun-interp60.lua.v6): GM.SEQ lists sequences
+  (gate / burst "shard" / bird + star loop / drip 12A-12C "rigid"). Pairs built at start from the ROM: gates with the old
+  blade matcher; others with a Hungarian assignment on cost = side (normal dot, x400: 2-sided panels!) + shape (sorted
+  edge lengths) + colour (600) + centroid distance x0.5, or for shards (1-dot(direction))x4000; equal corner counts ->
+  best cyclic shift, corners shared via (iA, iB) keys; unmatched / corner-count mismatch -> shrink to / grow from the
+  centroid (dropped below 15%). Writer: per-face lerped normals renormalised to 16384, colour switches at 0.5, one 0x400-
+  word slot per managed id at 0x25000+ (23 ids). Pairs work both ways (12B<->12C).
+  Per object: prev id, current id, d = length of the stage that just ended (capped 8; a rest pose or the first stage counts
+  max 2 -> gates behave exactly as before). Display fraction f = min(1, (jc - since + 1) / d). Extras: same stage -> lerp f;
+  B starts the next stage -> finish A's blend, then continue B's (t=0 = A exactly, needed for exact verify).
+  Env: STUN60_MORPH=0 (or STUN60_GATEMORPH=0) off, STUN60_MORPHLOG=1 (or STUN60_GATELOG=1) logs stage changes.
+- Tests: A/B vs v6 (re-probes/flip/ab_test.lua = gate_test with SCRIPT env): same drawn/extra/ticks, Lua ms unchanged,
+  startup +~15 ms; verify exact (see current state). Burst before/after strip: flip/out/burst-compare2.png (in-betweens
+  now show the sparks spreading). Bird seen only far away headless (few pixels); no glitches. Not yet seen live.

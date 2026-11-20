@@ -8,7 +8,7 @@
 -- Needs overclocking (Tab > Slider Controls, MAME started with -cheat): gsp, adsp and
 -- maincpu at about 400%. Without enough overclock the extra frames are dropped and the
 -- game falls back to its normal 20 fps pacing (never runs fast or slow because of this).
--- RAM/IO patching; the only ROM change is the gate morph (blended gate models in unused SIM ROM space, see below).
+-- RAM/IO patching; the only ROM change is the model morph (blended flipbook models in unused SIM ROM space, see below).
 -- See CLAUDE.md for how it works.
 
 -- MAME re-runs the autoboot script after a machine reset; keep only the first instance.
@@ -64,45 +64,64 @@ local function W68(a, d) self_write = true; ms:write_u16(a, d); self_write = fal
 local function WG(a, d)  self_write = true; gsp:write_u16(a, d); self_write = false end
 
 -- ---------------------------------------------------------------------------
--- Gate morph: the iris gates at the tunnel mouths are a flipbook of 8 flat 3D models (ids CC..D3, one blade
--- polygon per blade, 8 blades) that the game switches every second tick. For even motion every rendered frame
--- (the real ones too) gets a gate "phase": the first tick of a stage shows half way from the previous stage,
--- in-betweens interpolate. A blended model is built blade by blade (blades matched by colour and angle, outlines
--- padded to the same corner count and aligned) and written into unused SIM ROM space; the model table entry of
--- the id in the object slot points at it while the ADSP renders that job. Built at start from the ROM itself.
--- SIM ROM ("user1"): word [id] = model address / 4. Model: nv, nv-1, 1, nv vertices (x, y, z; the last one is the
--- face normal), a pointer to the face list, (face address, colour) pairs, 0 0, faces (normal index, 1-based
--- vertex indices, FFFF). Addresses are 16-bit inside the model's 0x10000-word window.
-local GM = {on = os.getenv("STUN60_GATEMORPH") ~= "0", log = os.getenv("STUN60_GATELOG") == "1", FIRST = 0xCC, LAST = 0xD3, BUF = 0x25000, SLOT = 0x180}
+-- Model morph: some objects are flipbooks of pre-built 3D models that the game switches every tick or few ticks
+-- (iris gates at tunnel mouths, the spark burst when a shot hits, the flapping bird, the pulsing star, the drip).
+-- For even motion every rendered frame (the real ones too) gets a blend between the previous and the current model:
+-- faces are matched between consecutive models (gates: blades by colour + angle; others: min-cost assignment on
+-- shape, colour, side and position, or on direction for the burst's flying shards), corners aligned, and the blended
+-- model is written into unused SIM ROM space; the model table entry of the id in the object slot points at it while
+-- the ADSP renders that job (display only, game logic unaffected). Everything is built at start from the ROM itself.
+-- SIM ROM ("user1"): word [id] = model address / 4. Model: n, nvert, nnorm, n entries (x, y, z: vertices, then face
+-- normals), a pointer to the face list, (face address, colour) pairs, 0 0, faces (normal index, 1-based vertex
+-- indices, FFFF). Addresses are 16-bit inside the model's 0x10000-word window.
+-- Env: STUN60_MORPH=0 (or the old STUN60_GATEMORPH=0) off, STUN60_MORPHLOG=1 logs stage changes.
+local GM = {on = os.getenv("STUN60_MORPH") ~= "0" and os.getenv("STUN60_GATEMORPH") ~= "0",
+            log = os.getenv("STUN60_MORPHLOG") == "1" or os.getenv("STUN60_GATELOG") == "1",
+            BUF = 0x25000, SLOT = 0x400}
+GM.SEQ = {
+  {name = "gate",  kind = "gate",  ids = {0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3}},
+  {name = "burst", kind = "shard", ids = {0xE6, 0xE8, 0xEA, 0xEC}},
+  {name = "bird",  kind = "rigid", ids = {0x124, 0x125, 0x126, 0x127, 0x128, 0x129}, loop = true},
+  {name = "star",  kind = "rigid", ids = {0xFB, 0xFC}, loop = true},
+  {name = "drip",  kind = "rigid", ids = {0x12A, 0x12B, 0x12C}},
+}
 do
   local R = mach.memory.regions[":mainpcb:user1"]
   GM.R = R
   local function rw(i) return R:read_u16(i * 2) end
   local function sw(v) if v >= 0x8000 then return v - 0x10000 end return v end
+  local function dist(a, b) local s = 0; for k = 1, #a do s = s + (a[k] - b[k])^2 end; return math.sqrt(s) end
+  -- generic model: entries (vertices + normals), nvert, faces {c, n (normal entry), idx}
   local function model(id)
     local a = rw(id) * 4
-    local nv = rw(a)
-    if nv < 4 or nv > 100 or rw(a + 1) ~= nv - 1 then return nil end
+    local n, nvert = rw(a), rw(a + 1)
+    if n < 2 or n > 400 or nvert + rw(a + 2) ~= n then return nil end
     local v = {}
-    for i = 0, nv - 1 do
-      v[i + 1] = {sw(rw(a + 3 + 3*i)), sw(rw(a + 4 + 3*i)), sw(rw(a + 5 + 3*i))}
-      if i < nv - 1 and v[i + 1][3] ~= 0 then return nil end          -- flat models only
-    end
+    for i = 0, n - 1 do v[i + 1] = {sw(rw(a + 3 + 3*i)), sw(rw(a + 4 + 3*i)), sw(rw(a + 5 + 3*i))} end
     local base = a & ~0xFFFF
-    local q, faces = base + rw(a + 3 + 3*nv), {}
-    while rw(q) ~= 0 and #faces < 16 do
-      local fp, col = rw(q), rw(q + 1); q = q + 2
-      local r, pts = base + fp + 1, {}
-      while rw(r) ~= 0xFFFF and #pts < 12 do local vv = v[rw(r)]; if not vv then return nil end; pts[#pts+1] = {vv[1], vv[2]}; r = r + 1 end
-      faces[#faces+1] = {col = col, pts = pts}
+    local q, faces = base + rw(a + 3 + 3*n), {}
+    while rw(q) ~= 0 do
+      if #faces >= 200 then return nil end
+      local r = base + rw(q); local col = rw(q + 1); q = q + 2
+      local f = {c = col, n = rw(r), idx = {}}
+      if not v[f.n] then return nil end
+      r = r + 1
+      while rw(r) ~= 0xFFFF do
+        local i = rw(r); if i < 1 or i > nvert or #f.idx >= 40 then return nil end
+        f.idx[#f.idx+1] = i; r = r + 1
+      end
+      if #f.idx < 3 then return nil end
+      faces[#faces+1] = f
     end
-    return faces
+    return {v = v, nvert = nvert, faces = faces}
   end
+  GM.model = model
+
+  -- gates: flat blades, matched by colour + centroid angle, outlines padded to equal corner counts
   local CY = 1561
   local function ang(p) local x, y = 0, 0; for _,q in ipairs(p) do x = x + q[1]; y = y + q[2] end; return math.atan(y / #p - CY, x / #p) end
   local function area(p) local s = 0; for i = 1, #p do local a, b = p[i], p[i % #p + 1]; s = s + a[1]*b[2] - b[1]*a[2] end; return s end
-  -- every way to add n2 - #P points on the edges of P (evenly spaced on an edge)
-  local function pads(P, N)
+  local function pads(P, N)       -- every way to add N - #P points on the edges of P (evenly spaced on an edge)
     local out, n = {}, #P
     local function rec(i, left, cnt)
       if i > n then
@@ -121,7 +140,7 @@ do
     rec(1, N - n, {})
     return out
   end
-  local function align(P, Q)
+  local function align2(P, Q)
     local N = math.max(#P, #Q)
     if (area(P) > 0) ~= (area(Q) > 0) then local r = {}; for i = #Q, 1, -1 do r[#r+1] = Q[i] end; Q = r end
     local best, bp, bq = nil
@@ -139,127 +158,305 @@ do
     end
     return bp, bq
   end
-  local function match(A, B)
-    local As, Bs = {}, {}
-    for _,f in ipairs(A) do As[#As+1] = f end; for _,f in ipairs(B) do Bs[#Bs+1] = f end
-    table.sort(As, function(x, y) return ang(x.pts) < ang(y.pts) end)
-    table.sort(Bs, function(x, y) return ang(x.pts) < ang(y.pts) end)
+  local NZ = {0, 0, -16384}
+  local function gate_pairs(ma, mb)
+    local function blades(m)
+      local out = {}
+      for _,f in ipairs(m.faces) do
+        local pts = {}
+        for _,i in ipairs(f.idx) do if m.v[i][3] ~= 0 then return nil end; pts[#pts+1] = {m.v[i][1], m.v[i][2]} end
+        if #pts > 12 then return nil end
+        out[#out+1] = {col = f.c, pts = pts}
+      end
+      return #out == 8 and out or nil
+    end
+    local A, B = blades(ma), blades(mb)
+    if not (A and B) then return nil end
+    table.sort(A, function(x, y) return ang(x.pts) < ang(y.pts) end)
+    table.sort(B, function(x, y) return ang(x.pts) < ang(y.pts) end)
     local best, bs = nil, 0
-    for sft = 0, #Bs - 1 do
+    for sft = 0, #B - 1 do
       local c = 0
-      for i, f in ipairs(As) do
-        local g = Bs[(i - 1 + sft) % #Bs + 1]
+      for i, f in ipairs(A) do
+        local g = B[(i - 1 + sft) % #B + 1]
         local d = math.abs((ang(f.pts) - ang(g.pts) + math.pi) % (2 * math.pi) - math.pi)
         c = c + d + ((g.col ~= f.col) and 100 or 0)
       end
       if not best or c < best then best, bs = c, sft end
     end
-    local pairs_ = {}
-    for i, f in ipairs(As) do
-      local g = Bs[(i - 1 + bs) % #Bs + 1]
-      local P, Q = align(f.pts, g.pts)
-      pairs_[#pairs_+1] = {col = f.col, P = P, Q = Q}
+    local prs = {}
+    for i, f in ipairs(A) do
+      local g = B[(i - 1 + bs) % #B + 1]
+      local P, Q = align2(f.pts, g.pts)
+      local pp, qq = {}, {}
+      for k = 1, #P do pp[k] = {P[k][1], P[k][2], 0}; qq[k] = {Q[k][1], Q[k][2], 0} end
+      prs[#prs+1] = {ca = f.col, cb = f.col, P = pp, Q = qq, na = NZ, nb = NZ}
     end
-    return pairs_
+    return prs
   end
+
+  -- 3D sequences: faces matched by a min-cost assignment
+  local function fdesc(m)
+    local out = {}
+    for _,f in ipairs(m.faces) do
+      local p = {}
+      for _,i in ipairs(f.idx) do p[#p+1] = m.v[i] end
+      local cen = {0, 0, 0}
+      for _,q in ipairs(p) do for k = 1, 3 do cen[k] = cen[k] + q[k] / #p end end
+      local r = math.sqrt(cen[1]^2 + cen[2]^2 + cen[3]^2); if r == 0 then r = 1 end
+      local el = {}
+      for i = 1, #p do el[i] = dist(p[i], p[i % #p + 1]) end
+      table.sort(el)
+      local nr = m.v[f.n]
+      local nl = math.sqrt(nr[1]^2 + nr[2]^2 + nr[3]^2); if nl == 0 then nl = 1 end
+      out[#out+1] = {c = f.c, idx = f.idx, p = p, cen = cen, dir = {cen[1]/r, cen[2]/r, cen[3]/r}, el = el,
+                     nrm = nr, nu = {nr[1]/nl, nr[2]/nl, nr[3]/nl}}
+    end
+    return out
+  end
+  local function cost(f, g, kind)
+    local side = (1 - (f.nu[1]*g.nu[1] + f.nu[2]*g.nu[2] + f.nu[3]*g.nu[3])) * 400   -- front/back of 2-sided panels
+    if kind == "shard" then          -- particles flying outward: same direction from the centre
+      local dot = f.dir[1]*g.dir[1] + f.dir[2]*g.dir[2] + f.dir[3]*g.dir[3]
+      return side + (1 - dot) * 4000 + ((#f.p == #g.p) and 0 or 500)
+    end
+    local shape = 400
+    if #f.el == #g.el then shape = 0; for i = 1, #f.el do shape = shape + math.abs(f.el[i] - g.el[i]) end end
+    return side + shape + ((f.c == g.c) and 0 or 600) + dist(f.cen, g.cen) * 0.5
+  end
+  local function hungarian(C, n)       -- square n x n cost matrix -> row -> column (min total cost)
+    local INF = math.huge
+    local u, v, p, way = {}, {}, {}, {}
+    for j = 0, n do u[j] = 0; v[j] = 0; p[j] = 0; way[j] = 0 end
+    for i = 1, n do
+      p[0] = i; local j0 = 0
+      local minv, used = {}, {}
+      for j = 0, n do minv[j] = INF; used[j] = false end
+      repeat
+        used[j0] = true
+        local i0, delta, j1 = p[j0], INF, 0
+        for j = 1, n do
+          if not used[j] then
+            local cur = C[i0][j] - u[i0] - v[j]
+            if cur < minv[j] then minv[j] = cur; way[j] = j0 end
+            if minv[j] < delta then delta = minv[j]; j1 = j end
+          end
+        end
+        for j = 0, n do
+          if used[j] then u[p[j]] = u[p[j]] + delta; v[j] = v[j] - delta else minv[j] = minv[j] - delta end
+        end
+        j0 = j1
+      until p[j0] == 0
+      repeat local j1 = way[j0]; p[j0] = p[j1]; j0 = j1 until j0 == 0
+    end
+    local r = {}
+    for j = 1, n do r[p[j]] = j end
+    return r
+  end
+  local UNM = 3000
+  local function shrink(f, toB)        -- unmatched face: collapses to (or grows from) its centroid
+    local P, Q = {}, {}
+    for k, q in ipairs(f.p) do
+      if toB then P[k] = q; Q[k] = f.cen else P[k] = f.cen; Q[k] = q end
+    end
+    return {ca = f.c, cb = f.c, P = P, Q = Q, na = f.nrm, nb = f.nrm, fade = toB and 1 or 2}
+  end
+  local function gen_pairs(ma, mb, kind)
+    local A, B = fdesc(ma), fdesc(mb)
+    local n = math.max(#A, #B)
+    local C = {}
+    for i = 1, n do
+      C[i] = {}
+      for j = 1, n do C[i][j] = (A[i] and B[j]) and math.min(cost(A[i], B[j], kind), UNM) or UNM end
+    end
+    local asg, prs = hungarian(C, n), {}
+    for i = 1, n do
+      local fa, fb = A[i], B[asg[i]]
+      if fa and fb and #fa.p == #fb.p and C[i][asg[i]] < UNM then
+        -- same corner count: best cyclic shift (centroid-relative, keeps the winding); shared corners stay shared
+        local m, best, br = #fa.p, nil, 0
+        for r = 0, m - 1 do
+          local c = 0
+          for k = 1, m do
+            local a, b = fa.p[k], fb.p[(k - 1 + r) % m + 1]
+            c = c + dist({a[1]-fa.cen[1], a[2]-fa.cen[2], a[3]-fa.cen[3]}, {b[1]-fb.cen[1], b[2]-fb.cen[2], b[3]-fb.cen[3]})
+          end
+          if not best or c < best then best, br = c, r end
+        end
+        local P, Q, key = {}, {}, {}
+        for k = 1, m do
+          local kb = (k - 1 + br) % m + 1
+          P[k] = fa.p[k]; Q[k] = fb.p[kb]; key[k] = fa.idx[k] * 1024 + fb.idx[kb]
+        end
+        prs[#prs+1] = {ca = fa.c, cb = fb.c, P = P, Q = Q, na = fa.nrm, nb = fb.nrm, key = key}
+      else
+        if fa then prs[#prs+1] = shrink(fa, true) end
+        if fb then prs[#prs+1] = shrink(fb, false) end
+      end
+    end
+    return prs
+  end
+
+  -- build all pairs; GM.pairs[a][b] = face pairs for a -> b (b -> a uses the same list reversed in time)
   if GM.on then
-    local ok = true
-    GM.orig, GM.cur, GM.key, GM.pairs = {}, {}, {}, {}
-    for id = GM.FIRST, GM.LAST do GM.orig[id] = rw(id); GM.cur[id] = GM.orig[id] end
-    local models = {}
-    for id = GM.FIRST, GM.LAST do models[id] = model(id); if not models[id] or #models[id] ~= 8 then ok = false end end
-    for i = GM.BUF, GM.BUF + GM.SLOT * 8 - 1 do if rw(i) ~= 0 then ok = false; break end end
-    if ok then for id = GM.FIRST, GM.LAST - 1 do GM.pairs[id] = match(models[id], models[id + 1]) end end
-    GM.on = ok
+    local ok, nslot = true, 0
+    GM.orig, GM.cur, GM.key, GM.slot, GM.pairs, GM.seqof = {}, {}, {}, {}, {}, {}
+    for _,s in ipairs(GM.SEQ) do
+      local ms, sok = {}, true
+      for _,id in ipairs(s.ids) do ms[id] = model(id); if not ms[id] then sok = false end end
+      local links = {}
+      for k = 1, #s.ids - 1 do links[#links+1] = {s.ids[k], s.ids[k+1]} end
+      if s.loop then links[#links+1] = {s.ids[#s.ids], s.ids[1]} end
+      if sok then
+        for _,l in ipairs(links) do
+          local a, b = l[1], l[2]
+          local prs = (s.kind == "gate") and gate_pairs(ms[a], ms[b]) or gen_pairs(ms[a], ms[b], s.kind)
+          if not prs then sok = false; break end
+          GM.pairs[a] = GM.pairs[a] or {}; GM.pairs[a][b] = prs
+        end
+      end
+      if sok then
+        for _,id in ipairs(s.ids) do
+          GM.orig[id] = rw(id); GM.cur[id] = GM.orig[id]; GM.slot[id] = nslot; GM.seqof[id] = s; nslot = nslot + 1
+        end
+        s.ok = true
+      else
+        s.ok = false
+      end
+    end
+    for i = GM.BUF, GM.BUF + GM.SLOT * nslot - 1 do if rw(i) ~= 0 then ok = false; break end end
+    if GM.BUF + GM.SLOT * nslot > 0x30000 then ok = false end
+    GM.on = ok and nslot > 0
   end
 end
-L("gate morph " .. (GM.on and "on" or "off (STUN60_GATEMORPH=0 or unexpected ROM data)"))
--- write the blend of stage lo -> lo+1 at fraction f into buffer slot s (word address returned)
-local function gm_write(s, lo, f)
-  local B = GM.BUF + GM.SLOT * s
-  local w, verts, faces = {}, {}, {}
-  for _,pr in ipairs(GM.pairs[lo]) do
-    local idx = {}
-    for i = 1, #pr.P do
-      local a, b = pr.P[i], pr.Q[i]
-      verts[#verts+1] = {math.floor(a[1] + (b[1]-a[1])*f + 0.5), math.floor(a[2] + (b[2]-a[2])*f + 0.5)}
-      idx[#idx+1] = #verts
+do
+  local names = {}
+  for _,s in ipairs(GM.SEQ) do if GM.on and s.ok then names[#names+1] = s.name end end
+  L("model morph " .. (GM.on and ("on: " .. table.concat(names, " ")) or "off (STUN60_MORPH=0 or unexpected ROM data)"))
+end
+-- pairs and fraction for a blend from model a to model b at f (b -> a = a -> b at 1 - f)
+local function gm_pairs(a, b, f)
+  if GM.pairs[a] and GM.pairs[a][b] then return GM.pairs[a][b], f end
+  if GM.pairs[b] and GM.pairs[b][a] then return GM.pairs[b][a], 1 - f end
+  return nil
+end
+-- write the blend a -> b at fraction f into the slot of id (word address returned, nil if it doesn't fit)
+local function gm_write(id, a, b, f)
+  local prs, g = gm_pairs(a, b, f)
+  if not prs then return nil end
+  local B = GM.BUF + GM.SLOT * GM.slot[id]
+  local verts, faces, vkey = {}, {}, {}
+  for _,pr in ipairs(prs) do
+    local s = 1
+    if pr.fade == 1 then s = 1 - g elseif pr.fade == 2 then s = g end
+    if s >= 0.15 then
+      local idx = {}
+      for k = 1, #pr.P do
+        local kk = pr.key and pr.key[k]
+        if kk and vkey[kk] then idx[k] = vkey[kk]
+        else
+          local p, q = pr.P[k], pr.Q[k]
+          verts[#verts+1] = {math.floor(p[1] + (q[1]-p[1])*g + 0.5), math.floor(p[2] + (q[2]-p[2])*g + 0.5),
+                             math.floor(p[3] + (q[3]-p[3])*g + 0.5)}
+          idx[k] = #verts
+          if kk then vkey[kk] = #verts end
+        end
+      end
+      local na, nb = pr.na, pr.nb
+      local nx, ny, nz = na[1] + (nb[1]-na[1])*g, na[2] + (nb[2]-na[2])*g, na[3] + (nb[3]-na[3])*g
+      local l = math.sqrt(nx*nx + ny*ny + nz*nz)
+      if l < 1000 then nx, ny, nz, l = na[1], na[2], na[3], 16384 end
+      local sc = 16384 / l
+      faces[#faces+1] = {col = (g < 0.5) and pr.ca or pr.cb, idx = idx,
+                         nrm = {math.floor(nx*sc + 0.5), math.floor(ny*sc + 0.5), math.floor(nz*sc + 0.5)}}
     end
-    faces[#faces+1] = {col = pr.col, idx = idx}
   end
-  local nv = #verts + 1
-  w[1], w[2], w[3] = nv, nv - 1, 1
-  for _,v in ipairs(verts) do w[#w+1] = v[1] & 0xFFFF; w[#w+1] = v[2] & 0xFFFF; w[#w+1] = 0 end
-  w[#w+1] = 0; w[#w+1] = 0; w[#w+1] = 0xC000                   -- normal (0, 0, -16384)
+  local nv = #verts
+  local n = nv + #faces
+  local size = 4 + 3 * n + 2 * #faces + 2
+  for _,fc in ipairs(faces) do size = size + #fc.idx + 2 end
+  if size > GM.SLOT or #faces == 0 then return nil end
+  local w = {n, nv, #faces}
+  for _,v in ipairs(verts) do w[#w+1] = v[1] & 0xFFFF; w[#w+1] = v[2] & 0xFFFF; w[#w+1] = v[3] & 0xFFFF end
+  for _,fc in ipairs(faces) do w[#w+1] = fc.nrm[1] & 0xFFFF; w[#w+1] = fc.nrm[2] & 0xFFFF; w[#w+1] = fc.nrm[3] & 0xFFFF end
   local L0 = B + #w + 1                                         -- face list right after its pointer
   w[#w+1] = L0 & 0xFFFF
   local F = L0 + 2 * #faces + 2
   for _,fc in ipairs(faces) do w[#w+1] = F & 0xFFFF; w[#w+1] = fc.col; F = F + #fc.idx + 2 end
   w[#w+1] = 0; w[#w+1] = 0
-  for _,fc in ipairs(faces) do
-    w[#w+1] = nv
+  for k, fc in ipairs(faces) do
+    w[#w+1] = nv + k
     for _,i in ipairs(fc.idx) do w[#w+1] = i end
     w[#w+1] = 0xFFFF
   end
   for i, v in ipairs(w) do GM.R:write_u16((B + i - 1) * 2, v) end
   return B
 end
--- point each gate id at the model for its phase (map: id -> phase, e.g. 0xCD - 0.5); ids not in map: original
+-- point each managed id at the model for its state (map: id -> {a, b, f} = blend a -> b at f); others: original
 local function gm_apply(map)
   if not GM.on then return end
-  for id = GM.FIRST, GM.LAST do
-    local ph, ptr, key = map and map[id], GM.orig[id], nil
-    if ph then
-      local lo = math.floor(ph + 1e-6)
-      local f = ph - lo
-      if lo < GM.FIRST then lo, f = GM.FIRST, 0 end
-      if lo >= GM.LAST then lo, f = GM.LAST, 0 end
-      if f < 0.01 then ptr = GM.orig[lo]
+  for id, orig in pairs(GM.orig) do
+    local st, ptr = map and map[id], orig
+    if st and st.f < 0.995 and st.a ~= st.b then
+      if st.f < 0.005 then ptr = GM.orig[st.a] or orig
       else
-        key = lo * 1000 + math.floor(f * 1000 + 0.5)
-        if GM.key[id] ~= key then gm_write(id - GM.FIRST, lo, f); GM.key[id] = key end
-        ptr = (GM.BUF + GM.SLOT * (id - GM.FIRST)) // 4
+        local key = st.a * 0x1000000 + st.b * 0x1000 + math.floor(st.f * 1000 + 0.5)
+        if GM.key[id] == key then ptr = (GM.BUF + GM.SLOT * GM.slot[id]) // 4
+        else
+          local B = gm_write(id, st.a, st.b, st.f)
+          if B then GM.key[id] = key; ptr = B // 4 else GM.key[id] = nil end
+        end
       end
     end
     if GM.cur[id] ~= ptr then GM.R:write_u16(id * 2, ptr); GM.cur[id] = ptr end
   end
 end
--- per 68010 object: its gate id and since which job (the game steps the gate every second tick)
+-- per 68010 object: previous and current model id, since which job, how long the previous stage lasted
 local gm_track = {}
-local function gm_isgate(id) return id and id >= GM.FIRST and id <= GM.LAST end
 local function gm_on_job(J, jc)
   if not GM.on then return end
   for obj, id in pairs(J.ids or {}) do
     local t = gm_track[obj]
-    if not t then gm_track[obj] = {id = id, since = jc, last = jc, half = false}
+    if not t then gm_track[obj] = {id = id, since = jc, last = jc, d = 1}
     else
       if id ~= t.id then
-        t.half = gm_isgate(id) and id == t.id + 1 and (jc - t.since) >= 2
-        if GM.log and (gm_isgate(id) or gm_isgate(t.id)) then
-          L(string.format("gate %08X: %X -> %X after %d jobs%s", obj, t.id, id, jc - t.since, t.half and " (half step)" or ""))
+        local link = gm_pairs(t.id, id, 0) ~= nil
+        -- cadence = length of the stage that just ended, if it was itself an animation step (not a rest pose)
+        t.d = math.max(1, math.min(t.prev and 8 or 2, jc - t.since))
+        t.prev = link and t.id or nil
+        if GM.log and (GM.orig[id] or GM.orig[t.id]) then
+          L(string.format("morph %08X: %X -> %X after %d jobs%s", obj, t.id, id, jc - t.since, link and "" or " (no morph)"))
         end
         t.id, t.since = id, jc
       end
       t.last = jc
     end
   end
-  local ph = {}
+  local st = {}
   for obj, t in pairs(gm_track) do
     if jc - t.last > 50 then gm_track[obj] = nil
-    elseif gm_isgate(t.id) and jc - t.last <= 3 then
-      ph[obj] = {id = t.id, ph = (t.half and jc == t.since) and (t.id - 0.5) or t.id}
+    elseif GM.orig[t.id] and jc - t.last <= 3 then
+      local f = t.prev and math.min(1, (jc - t.since + 1) / t.d) or 1
+      st[obj] = {id = t.id, a = t.prev or t.id, b = t.id, f = f}
     end
   end
-  J.gph = ph
+  J.gph = st
 end
+-- state per id for a render between real jobs A and B at t (the ADSP job carries A's ids)
 local function gm_map(A, B, t)
   if not (A and A.gph) then return nil end
   local map = {}
   for obj, a in pairs(A.gph) do
     local b = B and B.gph and B.gph[obj]
-    local p = a.ph
-    if b and math.abs(b.ph - a.ph) <= 1.01 then p = a.ph + (b.ph - a.ph) * t end
-    map[a.id] = p
+    local s = {a = a.a, b = a.b, f = a.f}
+    if b then
+      if b.a == a.a and b.b == a.b then s.f = a.f + (b.f - a.f) * t                  -- same stage
+      elseif b.a == a.b and b.b ~= a.b then                                          -- B starts the next stage:
+        local u = t * ((1 - a.f) + b.f)                                               -- finish A's blend, then B's
+        if u <= 1 - a.f then s.f = a.f + u else s = {a = b.a, b = b.b, f = u - (1 - a.f)} end
+      end
+    end
+    map[a.id] = s
   end
   return map
 end
