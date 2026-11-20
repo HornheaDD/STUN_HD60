@@ -5,7 +5,8 @@ the older https://github.com/HornheaDD/STUN60 = 60 fps-only v1.0, frozen). Machi
 backups) are in ~/CLAUDE.md on the user's PC and must NOT be copied here. Paths below assume the repo is ~/mame.
 Build tree (not in git): ~/mame/build/mame-mame0285 = MAME 0.285 source + stun60-mame0285.patch. ROMs (not in git): ~/mame/roms.
 
-## CURRENT STATE (2026-11-20). Start with this section.
+## CURRENT STATE (2026-11-20, evening: PAUSED, user taking a break). Start with this section.
+Nothing in progress. Next work only when the user picks it: HD course map / title screens, HD HUD text, widescreen 16:9 probe.
 Released: STUN_HD60 **hd-v1.4** (2026-11-20): HD anti-aliasing, HD sprites, HD compose pipeline (1 frame HD delay), pilot
 walk glide; new binaries (Linux package build + Windows). Before that hd-v1.3 (model morph, script-only).
 - Packages in package/out-hd/ (v1.3 copies in out-hd-v1.3/; release notes source package/out-hd/notes-v14.md, ignored).
