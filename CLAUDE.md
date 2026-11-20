@@ -19,6 +19,9 @@ the Windows package works on a real Windows PC and played the morph build live (
   reaches the bird at ~frame 8490).
 - Shell gotcha: `pgrep -f X` / `ps | grep X` wait loops match their own bash command line if it contains X. Use a pattern
   that only the MAME process line has, or wait on a PID.
+- **HD anti-aliasing DONE (2026-11-20), local commit, not released** (see "HD anti-aliasing" at the end). Next: #1 HD sprites
+  (bit-12 polys), then release both as hd-v1.4 (binaries change: rebuild Linux + Windows packages like hd-v1.1).
+  Note: the dev binary build/mame-mame0285/stun60 (= the user's launcher) now has AA on; v1.3 binary kept as build/stun60.v13-binary.
 - Other candidate work (ask the user): HD for GSP flag-bit-12 polygons (alt handler FFF48FC0, scaled 2D sprites such as
   the red arrows and the 162..16B sprite flipbooks), HD course map and title screens, widescreen 16:9 probe.
 - Release recipe for HD60: see "HD packages built and RELEASED" and the hd-v1.1/hd-v1.2 notes at the end.
@@ -653,3 +656,18 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - Tests: A/B vs v6 (re-probes/flip/ab_test.lua = gate_test with SCRIPT env): same drawn/extra/ticks, Lua ms unchanged,
   startup +~15 ms; verify exact (see current state). Burst before/after strip: flip/out/burst-compare2.png (in-betweens
   now show the sparks spreading). Bird seen only far away headless (few pixels); no glitches. Not yet seen live.
+
+## HD anti-aliasing (2026-11-20): edge-only supersampling + threaded polygon pass, local commit only
+- harddriv_v.cpp hd_compose step 3. STUN60_HDAA=A (default 2, 1 = off, max 4); STUN60_HDTHREADS (default
+  hardware_concurrency/2 clamped 1..4). Full-frame 2x2 SSAA cost 12-14 ms (3x3: 25 ms) -> rejected.
+- Method: pass 1 draws as before (one sample per HD pixel) and marks "edge pixels": per polygon per HD row, spans at the A
+  sub-rows (sample units); pixels between the min and max left end and min/max right end are marked (whole union if some
+  sub-row is empty). Sub-row spans are stored (band.sub) for pass 2. Pass 2: edge pixels sorted by row (counting sort + small
+  per-row sorts), A x A samples initialised from m_hd_pre (copy of the playfield before step 3), all polygons + wireframe
+  lines redrawn into those samples in list order with the same rules, averaged back. Equals full supersampling exactly
+  (bbox of diff = None on 3 frames). Edge pixels 13k-56k of 1.6M.
+- Bands: the playfield rows split into nb = m_hd_threads bands, each drawn by its own std::thread (spawned per frame; band 0
+  on the emulation thread); bands share m_hd_eidx/m_hd_pre/bitmap rows disjointly. AA off output = old renderer exactly.
+- Cost (3 concurrent test emulators, so pessimistic): polygon pass 1-1.9 ms (AA off) vs 2-3.5 ms (AA 2x2, 4 threads).
+  Unthrottled speed with HD always on: v1.3 ~134%, AA off 151%, AA 2x2 127%. Verify 1815/1815 both, same fps/ticks.
+- Images: scripts/re-probes/flip/out/aa-zoom.png (before/after tunnel edges, ignored folder).

@@ -67,6 +67,8 @@ Controls and tips
   - The full-screen course map between levels and a few flat 2D objects on the track (such as the
     red arrow markings) are not upscaled yet (original pixels, scaled).
   - STUN60_HDLINE sets the width of the HD wireframe lines in HD pixels (default 2).
+  - The HD polygon edges are smoothed (anti-aliased). On a slow PC, STUN60_HDAA=1 turns this off
+    and saves some CPU time.
   - stun60.log in the data folder shows per-second stats (drawn fps, game ticks, timing).
 
 Credits

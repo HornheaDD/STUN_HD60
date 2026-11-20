@@ -191,7 +191,7 @@
  #include "machine/timer.h"
  
  #include "sound/dac.h"
-@@ -384,6 +386,61 @@
+@@ -384,6 +386,69 @@
  
  	required_region_ptr<uint16_t> m_sim_memory;
  	uint16_t                m_som_memory[0x8000/2]{};
@@ -240,6 +240,14 @@
 +	std::vector<uint32_t>   m_hd_wpen;                  // up to 4 pens of wireframe lines that may cover this low-res pixel (+ count in m_hd_wcnt)
 +	std::vector<uint8_t>    m_hd_wcnt;
 +	double                  m_hd_linew = 2.0;           // HD wireframe line width in HD pixels (STUN60_HDLINE)
++	int                     m_hd_aa = 2;                // polygon anti-aliasing: AA x AA samples per HD pixel (STUN60_HDAA, 1 = off)
++	std::vector<uint32_t>   m_hd_pre;                   // the HD playfield before the polygon pass
++	std::vector<int32_t>    m_hd_eidx;                  // per HD pixel: index into its band's edge pixel list, -1 = not an edge pixel
++	// per band of HD rows (drawn in parallel): edge pixels (y * width + x), A x A samples each, the polygon spans at the
++	// A sub-rows of each row (pass 1 -> pass 2), work buffers
++	struct s60hd_band { std::vector<uint32_t> elist, esort, ss, rowstart; std::vector<int32_t> sub; };
++	std::vector<s60hd_band> m_hd_band;
++	int                     m_hd_threads = 1;           // threads for the polygon pass (STUN60_HDTHREADS)
 +	memory_passthrough_handler m_hd_tap;
 +	uint32_t                m_hd_lists = 0, m_hd_frames = 0;
 +	void hd_config(machine_config &config);
@@ -253,7 +261,7 @@
  	uint16_t *              m_adsp_pgm_memory_word = 0;
  
  	uint16_t *              m_ds3_sdata_memory = 0;
-@@ -676,7 +733,7 @@
+@@ -676,7 +741,7 @@
  protected:
  	virtual void device_add_mconfig(machine_config &config) override ATTR_COLD;
  	virtual void device_start() override ATTR_COLD;
@@ -281,7 +289,7 @@
  uint16_t harddriv_state::hd68k_port0_r()
 --- a/src/mame/atari/harddriv_v.cpp
 +++ b/src/mame/atari/harddriv_v.cpp
-@@ -9,6 +9,21 @@
+@@ -9,6 +9,22 @@
  #include "emu.h"
  #include "cpu/tms34010/tms34010.h"
  #include "harddriv.h"
@@ -291,6 +299,7 @@
 +#include "util/png.h"
 +
 +#include <chrono>
++#include <climits>
 +#include <cmath>
 +#include <filesystem>
 +#include <fstream>
@@ -303,7 +312,7 @@
  
  
  
-@@ -450,7 +465,1018 @@
+@@ -450,7 +466,1179 @@
  			color = vram_base[coloridx >> 1];
  		dest[x] = m_gfx_palettebank * 256 + color;
  	}
@@ -381,7 +390,13 @@
 +	if (const char *lw = std::getenv("STUN60_HDLINE"))
 +		m_hd_linew = std::clamp(std::atof(lw), 0.5, 8.0);
 +	m_hd_always = std::getenv("STUN60_HDALWAYS") || std::getenv("STUN60_HDDEBUG");
-+	std::fprintf(stderr, "stun60: HD screen %dx%d (x%d, x%d)\n", 512 * m_hd_sx, 240 * m_hd_sy, m_hd_sx, m_hd_sy);
++	if (const char *aa = std::getenv("STUN60_HDAA"))
++		m_hd_aa = std::clamp(std::atoi(aa), 1, 4);
++	m_hd_threads = std::clamp(int(std::thread::hardware_concurrency()) / 2, 1, 4);
++	if (const char *nt = std::getenv("STUN60_HDTHREADS"))
++		m_hd_threads = std::clamp(std::atoi(nt), 1, 16);
++	std::fprintf(stderr, "stun60: HD screen %dx%d (x%d, x%d), polygon anti-aliasing %dx%d, %d threads\n", 512 * m_hd_sx, 240 * m_hd_sy,
++			m_hd_sx, m_hd_sy, m_hd_aa, m_hd_aa, m_hd_threads);
 +	address_space &gsp = m_gsp->space(AS_PROGRAM);
 +	// FFF71680: set when the GSP has finished drawing a list, cleared at the vblank flip that shows it
 +	m_hd_tap = gsp.install_write_tap(0xfff71680, 0xfff7168f, "s60hd",
@@ -783,131 +798,286 @@
 +						m_hd_bgs.count(b.key) ? "HD" : "-");
 +	}
 +
-+	// 3. the polygons at full resolution, in list order (later ones on top)
++	// 3. the polygons at full resolution, in list order (later ones on top).
++	// Anti-aliasing (m_hd_aa = A > 1) is supersampling restricted to edge pixels: while drawing, every HD pixel a polygon
++	// edge may cross (judged from the spans at A sub-rows) is marked; afterwards those pixels alone are drawn again from
++	// the picture as it was before this pass at A x A samples, with the same rules and in the same order, and take the
++	// average. All other pixels are covered or not by each polygon in full, so this equals full supersampling, and edges
++	// shared by two polygons stay seamless.
++	// Rows are independent, so the playfield is split into bands drawn by m_hd_threads threads.
 +	if (list)
 +	{
-+		const int HW = W * SX;
++		const int HW = W * SX, HP = PLAY * SY;
++		const int A = std::max(m_hd_aa, 1), AA = A * A, SXA = SX * A;
++		const bool aa = A > 1;
++		if (aa)
++		{
++			m_hd_pre.resize(size_t(HW) * HP);
++			if (m_hd_eidx.size() != size_t(HW) * HP) m_hd_eidx.assign(size_t(HW) * HP, -1);
++		}
 +		// rows with no "drawn over" pixel take a plain span fill (almost all of them)
 +		std::vector<uint8_t> row_over(PLAY, 0);
 +		for (int r = 0; r < PLAY; r++)
 +			for (int x = 0; x < W; x++)
 +				if (m_hd_cls[r * W + x] == 2) { row_over[r] = 1; break; }
-+		// anti-aliased line (m_hd_linew wide, round ends) between low-res pixel centres, at full resolution
-+		const double hw = m_hd_linew * 0.5;
-+		auto hline = [&] (double ax, double ay, double bx, double by, uint32_t col)
++		// span of polygon p at vertical position u (in list lines from p.y0), in units of 1 / sx low-res pixels:
++		// lines are sampled at row centres, interpolate between them
++		auto span = [] (const s60hd_poly &p, double u, int sx, int maxx, int &X0, int &X1) -> bool
 +		{
-+			ax = (ax + 0.5) * SX; bx = (bx + 0.5) * SX;
-+			ay = (ay - 0x28 + 0.5) * SY; by = (by - 0x28 + 0.5) * SY;
-+			const double dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
-+			const int Y0 = std::max(int(std::floor(std::min(ay, by) - hw - 1)), 0);
-+			const int Y1 = std::min(int(std::ceil(std::max(ay, by) + hw + 1)), PLAY * SY - 1);
-+			const bool steep = std::abs(dy) >= std::abs(dx);
-+			const int cr = (col >> 16) & 0xff, cg = (col >> 8) & 0xff, cb = col & 0xff;
-+			auto plot = [&] (int X, int Y)
-+			{
-+				if (X < 0 || X >= HW || Y < Y0 || Y > Y1) return;
-+				if (m_hd_cls[(Y / SY) * W + X / SX] == 2) return;       // something was drawn over the 3D scene here
-+				const double px = X + 0.5 - ax, py = Y + 0.5 - ay;
-+				double t = l2 > 0 ? (px * dx + py * dy) / l2 : 0.0;
-+				t = std::clamp(t, 0.0, 1.0);
-+				const double ex = px - t * dx, ey = py - t * dy;
-+				const double cov = std::clamp(hw + 0.5 - std::sqrt(ex * ex + ey * ey), 0.0, 1.0);
-+				if (cov <= 0) return;
-+				uint32_t &d = bitmap.pix(Y, X);
-+				const int a = int(cov * 256);
-+				const int r = ((d >> 16) & 0xff), g = ((d >> 8) & 0xff), b = d & 0xff;
-+				d = 0xff000000 | ((r + (((cr - r) * a) >> 8)) << 16) | ((g + (((cg - g) * a) >> 8)) << 8) | (b + (((cb - b) * a) >> 8));
-+			};
-+			const int ext = int(std::ceil(hw + 1));
-+			if (steep)
-+			{
-+				for (int Y = Y0; Y <= Y1; Y++)
-+				{
-+					const double t = std::clamp((Y + 0.5 - ay) / dy, 0.0, 1.0);
-+					const int xc = int(std::floor(ax + t * dx));
-+					for (int X = xc - ext; X <= xc + ext; X++) plot(X, Y);
-+				}
-+			}
++			const int n = int(p.l.size());
++			double L, R;
++			if (n == 1) { L = double(p.l[0]); R = double(p.r[0]); }
 +			else
 +			{
-+				const int X0 = std::max(int(std::floor(std::min(ax, bx) - hw - 1)), 0);
-+				const int X1 = std::min(int(std::ceil(std::max(ax, bx) + hw + 1)), HW - 1);
-+				for (int X = X0; X <= X1; X++)
-+				{
-+					const double t = std::clamp((X + 0.5 - ax) / dx, 0.0, 1.0);
-+					const int yc = int(std::floor(ay + t * dy));
-+					for (int Y = yc - ext; Y <= yc + ext; Y++) plot(X, Y);
-+				}
++				int i = int(std::floor(u));
++				i = std::clamp(i, 0, n - 2);
++				const double f = u - i;
++				L = p.l[i] + (double(p.l[i + 1]) - double(p.l[i])) * f;
++				R = p.r[i] + (double(p.r[i + 1]) - double(p.r[i])) * f;
++				// in the half line beyond the first/last line the span may only narrow (sharper
++				// apexes), never widen (near-horizontal edges would grow long needles)
++				if (u < 0) { L = std::max(L, double(p.l[0])); R = std::min(R, double(p.r[0])); }
++				else if (u > n - 1) { L = std::max(L, double(p.l[n - 1])); R = std::min(R, double(p.r[n - 1])); }
 +			}
++			const double xl = L * (1.0 / 4294967296.0) - 0.5, xr1 = R * (1.0 / 4294967296.0) + 0.5;
++			X0 = std::max(int(std::ceil(xl * sx - 0.5)), 0);                  // centre in [xl, xr1)
++			X1 = std::min(int(std::ceil(xr1 * sx - 0.5)) - 1, maxx);
++			return X1 >= X0;
 +		};
-+		for (const s60hd_poly &p : list->polys)
++		// one sample / pixel of a filled polygon
++		auto shade = [] (uint32_t &d, int pat, uint32_t col)
 +		{
-+			if (p.outline)
++			if (pat == 2)
++			{
++				const rgb_t o(d);
++				d = rgb_t(0xff, o.r() * 7 / 10, o.g() * 7 / 10, o.b() * 7 / 10);
++			}
++			else if (pat == 1)
++			{
++				// 3 pixels in 4: the colour at 75% over what is behind it
++				const rgb_t o(d), c(col);
++				d = rgb_t(0xff, (o.r() + 3 * c.r()) / 4, (o.g() + 3 * c.g()) / 4, (o.b() + 3 * c.b()) / 4);
++			}
++			else
++				d = col;
++		};
++
++		const int nb = std::clamp(m_hd_threads, 1, 16);
++		if (int(m_hd_band.size()) < nb) m_hd_band.resize(nb);
++		// one band of HD rows [yb0, yb1)
++		auto band = [&] (s60hd_band &bs, int yb0, int yb1)
++		{
++			std::vector<uint32_t> &elist = bs.elist;
++			std::vector<int32_t> &sub = bs.sub;
++			elist.clear(); sub.clear();
++			if (aa)
++				for (int y = yb0; y < yb1; y++) std::memcpy(&m_hd_pre[size_t(y) * HW], &bitmap.pix(y), HW * sizeof(uint32_t));
++			auto mark = [&] (int y, int xa, int xb)
++			{
++				xa = std::max(xa, 0); xb = std::min(xb, HW - 1);
++				int32_t *e = &m_hd_eidx[size_t(y) * HW];
++				for (int x = xa; x <= xb; x++)
++					if (e[x] < 0) { e[x] = 0; elist.push_back(uint32_t(y) * HW + x); }
++			};
++			// anti-aliased line (m_hd_linew HD pixels wide, round ends) between low-res pixel centres; s = samples per
++			// HD pixel (1: into the picture; A: into the samples of edge pixels only)
++			auto hline = [&] (double ax, double ay, double bx, double by, uint32_t col, int s)
++			{
++				const double hw = m_hd_linew * 0.5 * s;
++				const int SXs = SX * s, SYs = SY * s, TW = HW * s;
++				ax = (ax + 0.5) * SXs; bx = (bx + 0.5) * SXs;
++				ay = (ay - 0x28 + 0.5) * SYs; by = (by - 0x28 + 0.5) * SYs;
++				const double dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
++				const int Y0 = std::max(int(std::floor(std::min(ay, by) - hw - 1)), yb0 * s);
++				const int Y1 = std::min(int(std::ceil(std::max(ay, by) + hw + 1)), yb1 * s - 1);
++				if (Y1 < Y0) return;
++				const bool steep = std::abs(dy) >= std::abs(dx);
++				const int cr = (col >> 16) & 0xff, cg = (col >> 8) & 0xff, cb = col & 0xff;
++				auto plot = [&] (int X, int Y)
++				{
++					if (X < 0 || X >= TW || Y < Y0 || Y > Y1) return;
++					if (m_hd_cls[(Y / SYs) * W + X / SXs] == 2) return;     // something was drawn over the 3D scene here
++					uint32_t *dp;
++					if (s == 1) dp = &bitmap.pix(Y, X);
++					else
++					{
++						const int32_t e = m_hd_eidx[size_t(Y / s) * HW + X / s];
++						if (e < 0) return;
++						dp = &bs.ss[size_t(e) * AA + (Y % s) * s + X % s];
++					}
++					const double px = X + 0.5 - ax, py = Y + 0.5 - ay;
++					double t = l2 > 0 ? (px * dx + py * dy) / l2 : 0.0;
++					t = std::clamp(t, 0.0, 1.0);
++					const double ex = px - t * dx, ey = py - t * dy;
++					const double cov = std::clamp(hw + 0.5 - std::sqrt(ex * ex + ey * ey), 0.0, 1.0);
++					if (cov <= 0) return;
++					uint32_t &d = *dp;
++					const int a = int(cov * 256);
++					const int r = ((d >> 16) & 0xff), g = ((d >> 8) & 0xff), b = d & 0xff;
++					d = 0xff000000 | ((r + (((cr - r) * a) >> 8)) << 16) | ((g + (((cg - g) * a) >> 8)) << 8) | (b + (((cb - b) * a) >> 8));
++				};
++				const int ext = int(std::ceil(hw + 1));
++				if (steep)
++				{
++					for (int Y = Y0; Y <= Y1; Y++)
++					{
++						const double t = std::clamp((Y + 0.5 - ay) / dy, 0.0, 1.0);
++						const int xc = int(std::floor(ax + t * dx));
++						for (int X = xc - ext; X <= xc + ext; X++) plot(X, Y);
++					}
++				}
++				else
++				{
++					const int X0 = std::max(int(std::floor(std::min(ax, bx) - hw - 1)), 0);
++					const int X1 = std::min(int(std::ceil(std::max(ax, bx) + hw + 1)), TW - 1);
++					for (int X = X0; X <= X1; X++)
++					{
++						const double t = std::clamp((X + 0.5 - ax) / dx, 0.0, 1.0);
++						const int yc = int(std::floor(ay + t * dy));
++						for (int Y = yc - ext; Y <= yc + ext; Y++) plot(X, Y);
++					}
++				}
++			};
++			auto outline = [&] (const s60hd_poly &p, int s)
 +			{
 +				const uint32_t col = pc(bank + p.pen);
 +				const size_t k = p.vy.size() - 1;
-+				hline(p.lxf[0], p.y0, p.rxf[0], p.y0, col);
++				hline(p.lxf[0], p.y0, p.rxf[0], p.y0, col, s);
 +				for (size_t j = 0; j < k; j++)
 +				{
-+					hline(p.lxf[j], p.y0 + p.vy[j], p.lxf[j + 1], p.y0 + p.vy[j + 1], col);
++					hline(p.lxf[j], p.y0 + p.vy[j], p.lxf[j + 1], p.y0 + p.vy[j + 1], col, s);
 +					if (!p.left_only)
-+						hline(p.rxf[j], p.y0 + p.vy[j], p.rxf[j + 1], p.y0 + p.vy[j + 1], col);
++						hline(p.rxf[j], p.y0 + p.vy[j], p.rxf[j + 1], p.y0 + p.vy[j + 1], col, s);
 +				}
 +				if (k)
-+					hline(p.lxf[k], p.y0 + p.vy[k], p.rxf[k], p.y0 + p.vy[k], col);
-+				continue;
-+			}
-+			const int pat = pattern(p.flags);
-+			const bool shadow = pat == 2;
-+			const uint32_t col = pc(bank + p.pen);
-+			const int n = int(p.l.size());
-+			const int r0 = std::max(p.y0 - 0x28, 0), r1 = std::min(p.y0 + n - 1 - 0x28, PLAY - 1);
-+			for (int r = r0; r <= r1; r++)
-+				for (int yy = 0; yy < SY; yy++)
++					hline(p.lxf[k], p.y0 + p.vy[k], p.rxf[k], p.y0 + p.vy[k], col, s);
++			};
++			// HD rows of polygon p inside this band
++			auto rows = [&] (const s60hd_poly &p, int &Ya, int &Yb)
++			{
++				const int n = int(p.l.size());
++				const int r0 = std::max(p.y0 - 0x28, 0), r1 = std::min(p.y0 + n - 1 - 0x28, PLAY - 1);
++				Ya = std::max(r0 * SY, yb0); Yb = std::min((r1 + 1) * SY, yb1);
++			};
++
++			// pass 1: every pixel at its centre; mark the edge pixels (and keep the sub-row spans for pass 2)
++			for (const s60hd_poly &p : list->polys)
++			{
++				if (p.outline) { outline(p, 1); continue; }
++				const int pat = pattern(p.flags);
++				const uint32_t col = pc(bank + p.pen);
++				int Ya, Yb; rows(p, Ya, Yb);
++				for (int Y = Ya; Y < Yb; Y++)
 +				{
-+					const int Y = r * SY + yy;
-+					// edge positions at this HD row: lines are sampled at row centres, interpolate between them
-+					const double u = (Y + 0.5) / SY + 0x28 - 0.5 - p.y0;
-+					double L, R;
-+					if (n == 1) { L = double(p.l[0]); R = double(p.r[0]); }
-+					else
++					const int r = Y / SY;
++					int X0, X1;
++					const bool any = span(p, (Y + 0.5) / SY + 0x28 - 0.5 - p.y0, SX, HW - 1, X0, X1);
++					if (aa)
 +					{
-+						int i = int(std::floor(u));
-+						i = std::clamp(i, 0, n - 2);
-+						const double f = u - i;
-+						L = p.l[i] + (double(p.l[i + 1]) - double(p.l[i])) * f;
-+						R = p.r[i] + (double(p.r[i + 1]) - double(p.r[i])) * f;
-+						// in the half line beyond the first/last line the span may only narrow (sharper
-+						// apexes), never widen (near-horizontal edges would grow long needles)
-+						if (u < 0) { L = std::max(L, double(p.l[0])); R = std::min(R, double(p.r[0])); }
-+						else if (u > n - 1) { L = std::max(L, double(p.l[n - 1])); R = std::min(R, double(p.r[n - 1])); }
++						// edge pixels: between the lowest and highest left (and right) end over the sub-rows
++						int l0 = INT_MAX, l1 = INT_MIN, h0 = INT_MAX, h1 = INT_MIN; bool empty = false;
++						if (any) { l0 = l1 = X0; h0 = h1 = X1; }
++						for (int k = 0; k < A; k++)
++						{
++							int a0, a1;
++							const bool ok = span(p, (Y + (k + 0.5) / A) / SY + 0x28 - 0.5 - p.y0, SXA, HW * A - 1, a0, a1);
++							sub.push_back(ok ? a0 : 1); sub.push_back(ok ? a1 : 0);
++							if (ok)
++							{
++								l0 = std::min(l0, a0 / A); l1 = std::max(l1, a0 / A);
++								h0 = std::min(h0, a1 / A); h1 = std::max(h1, a1 / A);
++							}
++							else empty = true;
++						}
++						if (l0 != INT_MAX)
++						{
++							if (empty || !any) mark(Y, l0, h1);
++							else { mark(Y, l0, l1); mark(Y, h0, h1); }
++						}
 +					}
-+					const double xl = L / 4294967296.0 - 0.5, xr1 = R / 4294967296.0 + 0.5;
-+					int X0 = int(std::ceil(xl * SX - 0.5)), X1 = int(std::ceil(xr1 * SX - 0.5)) - 1;   // centre in [xl, xr1)
-+					X0 = std::max(X0, 0);
-+					X1 = std::min(X1, HW - 1);
++					if (!any) continue;
 +					uint32_t *d = &bitmap.pix(Y);
-+					if (X1 < X0) continue;
 +					if (pat == 0 && !row_over[r]) { std::fill(d + X0, d + X1 + 1, col); continue; }
 +					const uint8_t *cls = &m_hd_cls[r * W];
 +					for (int X = X0; X <= X1; X++)
++						if (cls[X / SX] != 2)       // else something was drawn over the 3D scene here
++							shade(d[X], pat, col);
++				}
++			}
++			if (!aa) return;
++			if (elist.empty()) return;
++
++			// pass 2: the edge pixels again at A x A samples, then their average
++			// order by row (counting sort), then by x inside each row (a few dozen per row)
++			const size_t ne = elist.size();
++			const int nr = yb1 - yb0;
++			std::vector<uint32_t> &rowstart = bs.rowstart;
++			rowstart.assign(nr + 1, 0);
++			for (uint32_t e : elist) rowstart[e / HW - yb0 + 1]++;
++			for (int y = 0; y < nr; y++) rowstart[y + 1] += rowstart[y];
++			bs.esort.resize(ne);
++			{
++				std::vector<uint32_t> fillp(rowstart.begin(), rowstart.end() - 1);
++				for (uint32_t e : elist) bs.esort[fillp[e / HW - yb0]++] = e;
++			}
++			elist.swap(bs.esort);
++			for (int y = 0; y < nr; y++)
++				if (rowstart[y + 1] - rowstart[y] > 1) std::sort(&elist[rowstart[y]], &elist[0] + rowstart[y + 1]);
++			for (size_t i = 0; i < ne; i++) m_hd_eidx[elist[i]] = int32_t(i);
++			bs.ss.resize(ne * AA);
++			for (size_t i = 0; i < ne; i++) std::fill_n(&bs.ss[i * AA], AA, m_hd_pre[elist[i]]);
++			const int32_t *sp = sub.data();
++			for (const s60hd_poly &p : list->polys)
++			{
++				if (p.outline) { outline(p, A); continue; }
++				const int pat = pattern(p.flags);
++				const uint32_t col = pc(bank + p.pen);
++				int Ya, Yb; rows(p, Ya, Yb);
++				for (int Y = Ya; Y < Yb; Y++, sp += 2 * A)
++				{
++					const uint32_t *e0 = &elist[0];
++					const uint32_t *eb = e0 + rowstart[Y - yb0], *ee = e0 + rowstart[Y - yb0 + 1];
++					if (eb == ee) continue;
++					const uint8_t *cls = &m_hd_cls[(Y / SY) * W];
++					for (int k = 0; k < A; k++)
 +					{
-+						if (cls[X / SX] == 2) continue;       // something was drawn over the 3D scene here
-+						if (shadow)
++						const int X0 = sp[2 * k], X1 = sp[2 * k + 1];
++						if (X1 < X0) continue;
++						const uint32_t *it = std::lower_bound(eb, ee, uint32_t(Y) * HW + X0 / A);
++						for (; it != ee && int(*it - uint32_t(Y) * HW) <= X1 / A; ++it)
 +						{
-+							const rgb_t o(d[X]);
-+							d[X] = rgb_t(0xff, o.r() * 7 / 10, o.g() * 7 / 10, o.b() * 7 / 10);
++							const int x = int(*it - uint32_t(Y) * HW);
++							if (cls[x / SX] == 2) continue;
++							uint32_t *sm = &bs.ss[size_t(it - e0) * AA + k * A];
++							for (int j = 0; j < A; j++)
++							{
++								const int X = x * A + j;
++								if (X >= X0 && X <= X1) shade(sm[j], pat, col);
++							}
 +						}
-+						else if (pat == 1)
-+						{
-+							// 3 pixels in 4: the colour at 75% over what is behind it
-+							const rgb_t o(d[X]), c(col);
-+							d[X] = rgb_t(0xff, (o.r() + 3 * c.r()) / 4, (o.g() + 3 * c.g()) / 4, (o.b() + 3 * c.b()) / 4);
-+						}
-+						else
-+							d[X] = col;
 +					}
 +				}
++			}
++			for (size_t i = 0; i < ne; i++)
++			{
++				const uint32_t *sm = &bs.ss[i * AA];
++				uint32_t rs = 0, gs = 0, bsum = 0;
++				for (int k = 0; k < AA; k++) { rs += (sm[k] >> 16) & 0xff; gs += (sm[k] >> 8) & 0xff; bsum += sm[k] & 0xff; }
++				const uint32_t e = elist[i];
++				bitmap.pix(e / HW, e % HW) = 0xff000000 | ((rs / AA) << 16) | ((gs / AA) << 8) | (bsum / AA);
++				m_hd_eidx[e] = -1;
++			}
++		};
++		std::vector<std::thread> th;
++		for (int i = 1; i < nb; i++)
++			th.emplace_back(band, std::ref(m_hd_band[i]), HP * i / nb, HP * (i + 1) / nb);
++		band(m_hd_band[0], 0, HP / nb);
++		for (std::thread &t : th) t.join();
++		if (dbg && aa && (m_hd_frames % 300) == 0)
++		{
++			size_t ne = 0;
++			for (int i = 0; i < nb; i++) ne += m_hd_band[i].elist.size();
++			std::fprintf(stderr, "stun60 HD AA: %zu edge pixels of %d, %d threads\n", ne, HW * HP, nb);
 +		}
 +	}
 +	if (dbg)

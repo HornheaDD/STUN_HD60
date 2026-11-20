@@ -17,7 +17,9 @@ morphed model to model so they move smoothly too: parts are matched between cons
 the game itself (`STUN60_MORPH=0` turns this off).
 
 **HD redraw:** the patched driver reads the game's own polygon list (already projected to the screen by the game) and
-redraws every 3D polygon at 3x5 the resolution on a second screen, with the game's colours. The wireframe the vehicle turns into on a
+redraws every 3D polygon at 3x5 the resolution on a second screen, with the game's colours. Polygon edges are anti-aliased
+(2x2 supersampling of the pixels an edge crosses, so neighbouring polygons stay seamless; `STUN60_HDAA=1` turns it off,
+3 or 4 = finer), and the polygons are drawn by several threads (`STUN60_HDTHREADS`, default half the CPU threads, up to 4). The wireframe the vehicle turns into on a
 boost, and scenes drawn entirely as wireframe, are redrawn as smooth thin lines (`STUN60_HDLINE` = line width in HD
 pixels, default 2); the see-through dissolve at the start of a boost is redrawn as a smooth transparent fill. Everything that is not 3D
 (HUD, text) is taken from the original picture and scaled up.
