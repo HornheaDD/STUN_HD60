@@ -58,8 +58,10 @@ Controls and tips
     STUN60_CRT=deluxe|geom|off forces a screen effect for one launch, and STUN60_HD= (empty) starts
     without the HD screen.
   - Level-change and attract-mode text screens stay at 20 fps (nothing 3D to interpolate there).
-  - The iris gates at the tunnel mouths open smoothly: the original steps them like a flipbook
-    (about 7 times a second); they are morphed blade by blade. STUN60_GATEMORPH=0 turns this off.
+  - Flipbook animations are smoothed: the original steps some objects through a few fixed shapes
+    (the iris gates at the tunnel mouths, the spark burst when a shot hits, the flapping bird,
+    the star after a hit, the wobbling drop); they are now morphed shape to shape at 60 fps.
+    STUN60_MORPH=0 turns this off.
   - It needs a reasonably fast CPU: roughly an Intel 8th-gen quad-core laptop chip or better.
     The HD redraw adds about 2-3 ms of CPU time per frame while the HD picture is shown.
   - The full-screen course map between levels and a few flat 2D objects on the track (such as the

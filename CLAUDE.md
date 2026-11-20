@@ -6,11 +6,10 @@ backups) are in ~/CLAUDE.md on the user's PC and must NOT be copied here. Paths 
 Build tree (not in git): ~/mame/build/mame-mame0285 = MAME 0.285 source + stun60-mame0285.patch. ROMs (not in git): ~/mame/roms.
 
 ## CURRENT STATE (2026-11-20). Start with this section.
-Released: STUN_HD60 **hd-v1.2** (60 fps + HD redraw 3x5 + HD backgrounds + HD wireframe + gate morph). User confirmed the
-Windows package works on a real Windows PC (2026-11-20).
-- **In progress: model morph** (generalised gate morph; see "Model morph" at the end). Script done + headless-verified,
-  committed locally, NOT pushed / not released. Next: user plays live (desktop launcher uses ~/mame/scripts directly), then
-  release as hd-v1.3 (script-only, same recipe as hd-v1.2; README + README-HD.txt mention the morphs).
+Released: STUN_HD60 **hd-v1.3** (2026-11-20; = hd-v1.2 + model morph: gates, spark burst, bird, star, drip). User confirmed
+the Windows package works on a real Windows PC and played the morph build live ("seems ok").
+- hd-v1.3 = script-only (binaries = v1.1). Packages in package/out-hd/ (v1.2 copies in out-hd-v1.2/). Smoke tests: tar.gz
+  scripted game verify 700/700, AppImage boots (fake HOME), Wine boots; all log "model morph on: gate burst bird star drip".
 - Verify baseline with the new script: normal course 1774/1774, Advanced 1814/1814 and (fresh nvram, to frame 11000) 1891/1891.
 - Untracked local-only files (keep out of git): hd-experiment/live-hd/Screenshot_*.png, gate-morph-compare.gif,
   wireframe-*-compare.png, wireframe-full-zoom.png.
@@ -624,7 +623,7 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
   out-hd/STUNRunnerHD60-windows/bin, README-HD.txt notes the gate morph; archives rebuilt as for v1.1 (v1.1 files in
   package/out-hd-v1.1/). AppImage + Wine smoke tests: gate morph on, 60 fps / 20 ticks.
 
-## Model morph (2026-11-20): all smoothable flipbook models, local commit only
+## Model morph (2026-11-20): all smoothable flipbook models, RELEASED in hd-v1.3
 - Survey (re-probes/flip/idsurvey.lua: per 68010 object A2, model id changes; seqs.py/cad.py summarise): animated ids
   and cadence (game ticks per stage):
   - E4/E5 = the player's shot (long thin triangles); E6 -> E8 -> EA -> EC = spark burst when a shot hits (1 tick each,

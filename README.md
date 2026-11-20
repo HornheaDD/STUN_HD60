@@ -11,8 +11,10 @@ release. Everything from STUN60 is included here; press **H** in-game to switch 
 drawn frame, so simply unlocking the frame cap makes the whole game run three times too fast. This project keeps the game
 logic at its native 20 ticks per second and asks the game's **own 3D hardware** (the ADSP-2100 math board) to render two
 extra in-between frames per tick, with the camera and moving objects interpolated. The in-between images are real renders
-of the scene, not blended or AI-generated frames. The iris gates at the tunnel mouths, which the original animates as a flipbook of 8 models
-(about 7 steps a second), are morphed blade by blade so they open smoothly too (`STUN60_GATEMORPH=0` turns this off).
+of the scene, not blended or AI-generated frames. Objects the original animates as a flipbook of fixed 3D models (the iris
+gates at the tunnel mouths, the spark burst when a shot hits, the flapping bird, the star after a hit, the wobbling drop) are
+morphed model to model so they move smoothly too: parts are matched between consecutive models and the blend is rendered by
+the game itself (`STUN60_MORPH=0` turns this off).
 
 **HD redraw:** the patched driver reads the game's own polygon list (already projected to the screen by the game) and
 redraws every 3D polygon at 3x5 the resolution on a second screen, with the game's colours. The wireframe the vehicle turns into on a
@@ -50,7 +52,7 @@ statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
   centred. Not started yet; it depends on how far the game's own projection and clipping limits can be pushed without
   objects popping in at the edges.
 
-**Download:** [S.T.U.N. Runner HD60 v1.2](https://github.com/HornheaDD/STUN_HD60/releases/latest) for Windows x64 and
+**Download:** [S.T.U.N. Runner HD60 v1.3](https://github.com/HornheaDD/STUN_HD60/releases/latest) for Windows x64 and
 Linux x86-64 (AppImage or tar.gz, about 50 MB each, Real-ESRGAN included).
 The 60 fps-only builds are on the [STUN60 Releases page](https://github.com/HornheaDD/STUN60/releases/latest).
 
