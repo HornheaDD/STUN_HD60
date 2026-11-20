@@ -182,16 +182,18 @@
  
 --- a/src/mame/atari/harddriv.h
 +++ b/src/mame/atari/harddriv.h
-@@ -28,6 +28,8 @@
+@@ -28,6 +28,10 @@
  #include "machine/eeprompar.h"
  #include "machine/mc68681.h"
  #include "machine/timekpr.h"
 +#include <unordered_map>
++#include <condition_variable>
 +#include <mutex>
++#include <thread>
  #include "machine/timer.h"
  
  #include "sound/dac.h"
-@@ -384,6 +386,73 @@
+@@ -384,6 +388,86 @@
  
  	required_region_ptr<uint16_t> m_sim_memory;
  	uint16_t                m_som_memory[0x8000/2]{};
@@ -260,12 +262,25 @@
 +	void hd_capture_line(screen_device &screen, int scanline, const uint16_t *dest, int x0, int x1);
 +	uint32_t hd_screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect);
 +	void hd_compose(bitmap_rgb32 &bitmap);
-+	bitmap_rgb32            m_hd_bitmap;              // composed right after the low-res frame completes (no lag)
++	// HD picture: m_hd_disp is shown; the next one is composed into m_hd_work by a worker thread while the following frame
++	// is emulated (1 frame later than the original picture), or right away with STUN60_HDSYNC=1 (no delay)
++	bitmap_rgb32            m_hd_bitmap, m_hd_back;
++	bitmap_rgb32           *m_hd_disp = &m_hd_bitmap, *m_hd_work = &m_hd_back;
++	std::vector<rgb_t>      m_hd_pal;                   // palette as it was when the frame being composed completed
++	int                     m_hd_bank = 0;              // palette bank then
++	bool                    m_hd_sync = false;
++	std::thread             m_hd_worker;
++	std::mutex              m_hd_wlock;
++	std::condition_variable m_hd_wcv;
++	bool                    m_hd_wjob = false, m_hd_wdone = false, m_hd_wquit = false;
++	void hd_worker_loop();
++	void hd_worker_wait();
++	void hd_stop();
 +	bool                    m_hd_always = false;
  	uint16_t *              m_adsp_pgm_memory_word = 0;
  
  	uint16_t *              m_ds3_sdata_memory = 0;
-@@ -676,7 +745,7 @@
+@@ -676,7 +760,7 @@
  protected:
  	virtual void device_add_mconfig(machine_config &config) override ATTR_COLD;
  	virtual void device_start() override ATTR_COLD;
@@ -317,7 +332,7 @@
  
  
  
-@@ -450,7 +467,1319 @@
+@@ -450,7 +467,1386 @@
  			color = vram_base[coloridx >> 1];
  		dest[x] = m_gfx_palettebank * 256 + color;
  	}
@@ -392,6 +407,10 @@
 +	m_hd_done.assign(512 * 256, 0);
 +	m_hd_bitmap.allocate(512 * m_hd_sx, 240 * m_hd_sy);
 +	m_hd_bitmap.fill(0xff000000);
++	m_hd_back.allocate(512 * m_hd_sx, 240 * m_hd_sy);
++	m_hd_back.fill(0xff000000);
++	m_hd_sync = std::getenv("STUN60_HDSYNC") != nullptr;
++	machine().add_notifier(MACHINE_NOTIFY_EXIT, machine_notify_delegate(&harddriv_state::hd_stop, this));
 +	if (const char *lw = std::getenv("STUN60_HDLINE"))
 +		m_hd_linew = std::clamp(std::atof(lw), 0.5, 8.0);
 +	m_hd_always = std::getenv("STUN60_HDALWAYS") || std::getenv("STUN60_HDDEBUG");
@@ -498,7 +517,6 @@
 +// Parse the list the GSP just drew (its address is at FFF77F30/40) into polygons.
 +void harddriv_state::hd_parse_list()
 +{
-+	hd_take_built();
 +	address_space &gsp = m_gsp->space(AS_PROGRAM);
 +	auto w = [&gsp] (uint32_t a) -> uint16_t { return gsp.read_word(a); };
 +	const uint32_t ptr = w(0xfff77f30) | (uint32_t(w(0xfff77f40)) << 16);
@@ -684,20 +702,84 @@
 +		out[i] = (x >= x0 && x < x1) ? dest[x] : 0;
 +	if (scanline == vis.bottom())
 +	{
++		// the previous HD frame must be finished first: it reads m_hd_done, the list, the palette copy and m_hd_bgs
++		hd_worker_wait();
++		hd_take_built();
 +		m_hd_done.swap(m_hd_lowres);
 +		m_hd_done_list = m_hd_cur;
 +		m_hd_w = std::min(vis.width(), 512);
 +		m_hd_h = std::min(vis.height(), 256);
 +		m_hd_frames++;
-+		// compose now, so the HD screen shows this frame (its own refresh comes slightly earlier)
 +		if (m_hd_always || machine().render().is_live(*m_hdscreen))
-+			hd_compose(m_hd_bitmap);
++		{
++			const rgb_t *pens = m_palette->palette()->entry_list_adjusted();   // colours (pens() would give indices)
++			m_hd_pal.assign(pens, pens + m_palette->entries());
++			m_hd_bank = m_gfx_palettebank;
++			if (m_hd_sync)
++			{
++				// compose now, so the HD screen shows this frame (its own refresh comes slightly earlier)
++				hd_compose(*m_hd_work);
++				std::swap(m_hd_disp, m_hd_work);
++			}
++			else
++			{
++				// compose in the worker while the next frame is emulated; shown from the next frame on
++				if (!m_hd_worker.joinable())
++					m_hd_worker = std::thread([this] () { hd_worker_loop(); });
++				std::lock_guard<std::mutex> g(m_hd_wlock);
++				m_hd_wjob = true;
++				m_hd_wcv.notify_all();
++			}
++		}
 +	}
++}
++
++void harddriv_state::hd_worker_loop()
++{
++	std::unique_lock<std::mutex> g(m_hd_wlock);
++	for (;;)
++	{
++		m_hd_wcv.wait(g, [this] () { return m_hd_wjob || m_hd_wquit; });
++		if (m_hd_wquit)
++			return;
++		g.unlock();
++		hd_compose(*m_hd_work);
++		g.lock();
++		m_hd_wjob = false;
++		m_hd_wdone = true;
++		m_hd_wcv.notify_all();
++	}
++}
++
++// wait until the worker has finished its frame, then show it
++void harddriv_state::hd_worker_wait()
++{
++	if (!m_hd_worker.joinable())
++		return;
++	std::unique_lock<std::mutex> g(m_hd_wlock);
++	m_hd_wcv.wait(g, [this] () { return !m_hd_wjob; });
++	if (m_hd_wdone)
++	{
++		m_hd_wdone = false;
++		std::swap(m_hd_disp, m_hd_work);
++	}
++}
++
++void harddriv_state::hd_stop()
++{
++	if (!m_hd_worker.joinable())
++		return;
++	{
++		std::lock_guard<std::mutex> g(m_hd_wlock);
++		m_hd_wquit = true;
++		m_hd_wcv.notify_all();
++	}
++	m_hd_worker.join();
 +}
 +
 +uint32_t harddriv_state::hd_screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect)
 +{
-+	copybitmap(bitmap, m_hd_bitmap, 0, 0, 0, 0, cliprect);
++	copybitmap(bitmap, *m_hd_disp, 0, 0, 0, 0, cliprect);
 +	return 0;
 +}
 +
@@ -709,7 +791,7 @@
 +	const int SX = m_hd_sx, SY = m_hd_sy;
 +	const int W = std::min(m_hd_w, bitmap.width() / SX), H = std::min(m_hd_h, bitmap.height() / SY);
 +	const int PLAY = std::min(208, H);          // 3D playfield rows (the HUD is below)
-+	const int bank = m_gfx_palettebank * 256;
++	const int bank = m_hd_bank * 256;
 +	const s60hd_list *list = m_hd_done_list.get();
 +	auto shadow_on = [] (int x, int y) { return (x & 3) == ((y & 1) ? 2 : 0); };
 +	// fill pattern (GSP FFF45150): mode 2 = 1 pixel in 4 (01010101, the shadow), mode 1 or colour index 4 = 3 pixels
@@ -801,8 +883,8 @@
 +		}
 +
 +	// 2. classify, then fill the HD bitmap with the low-res image scaled up
-+	const rgb_t *pens = m_palette->palette()->entry_list_adjusted();   // colours (pens() would give indices)
-+	const int npens = m_palette->entries();
++	const rgb_t *pens = m_hd_pal.data();             // palette copy taken when the frame completed
++	const int npens = int(m_hd_pal.size());
 +	auto pc = [pens, npens] (int v) -> uint32_t { return uint32_t(pens[v < npens ? v : 0]) | 0xff000000; };
 +	m_hd_cls.assign(W * H, 0);
 +	for (int r = 0; r < H; r++)
@@ -1244,10 +1326,10 @@
 +// scaled by live / reference for its pen, so fades and colour cycling still work.
 +void harddriv_state::hd_draw_bg(bitmap_rgb32 &bitmap, const s60hd_blit &b, const s60hd_bg &bg, int W, int H)
 +{
-+	const int SX = m_hd_sx, SY = m_hd_sy, bank = m_gfx_palettebank * 256;
++	const int SX = m_hd_sx, SY = m_hd_sy, bank = m_hd_bank * 256;
 +	const bool transp = b.flags & 0x20;
-+	const rgb_t *pens = m_palette->palette()->entry_list_adjusted();
-+	const int npens = m_palette->entries();
++	const rgb_t *pens = m_hd_pal.data();
++	const int npens = int(m_hd_pal.size());
 +	int fac[256][3]; bool same = true;
 +	for (uint8_t i : bg.used)
 +	{

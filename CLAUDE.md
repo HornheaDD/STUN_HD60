@@ -19,7 +19,7 @@ the Windows package works on a real Windows PC and played the morph build live (
   reaches the bird at ~frame 8490).
 - Shell gotcha: `pgrep -f X` / `ps | grep X` wait loops match their own bash command line if it contains X. Use a pattern
   that only the MAME process line has, or wait on a PID.
-- **HD anti-aliasing + HD sprites DONE (2026-11-20), local commits, not released** (see "HD anti-aliasing" and "HD sprites"
+- **HD anti-aliasing + HD sprites + HD compose pipeline DONE (2026-11-20), local commits, not released** (see "HD anti-aliasing" and "HD sprites"
   at the end). Next: user plays live, then release as hd-v1.4 (binaries change: rebuild Linux + Windows packages like hd-v1.1).
   Note: the dev binary build/mame-mame0285/stun60 (= the user's launcher) has both; v1.3 binary kept as build/stun60.v13-binary.
 - Other candidate work (ask the user): HD course map and title screens, HD HUD text, widescreen 16:9 probe.
@@ -689,3 +689,16 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
   shift search against v1.3). With AA the whole rectangle is marked as edge pixels (outline + shrunk detail anti-aliased).
 - Tests: verify 1815/1815, drawn 54.4, speed 127% (= AA build). Images: re-probes/flip/out/spr-zoom.png (spark),
   re-probes/sprite/out/panel-zoom.png, sprites-sheet.png (all ignored, ROM-derived).
+
+## HD compose pipelined (2026-11-20, user report "announcer at game start sounds choppy")
+- Cause: AA added ~3-4 ms/frame in the game-start scene (runner walks to the craft, ~367 polys, ~60k edge pixels) where the
+  emulation is busiest; host time per emulated second reached 1123 ms (> 1000 = behind real time = choppy sound).
+  Measured with re-probes/flip/ftime.lua (per-frame host ms, WLOG, frames F0..F1, wraps ab_test.lua): worst second
+  v1.3 883 ms, AA 4 threads 1123, AA off 890, AA 8 threads 994.
+- Fix (user's choice, accepted 1 frame of HD delay): hd_compose runs in a worker thread (m_hd_worker, condvar) while the next
+  frame is emulated. At the bottom row: wait for the worker, show its bitmap (m_hd_disp/m_hd_work swap), hd_take_built()
+  (moved here from hd_parse_list, so m_hd_bgs changes only while the worker is idle), swap low-res buffers, copy the palette
+  (m_hd_pal) + bank (m_hd_bank), start the job. MACHINE_NOTIFY_EXIT joins the worker (hd_stop). STUN60_HDSYNC=1 = old
+  synchronous path (no delay).
+- Results: worst second 695 ms; pipelined snapshot at frame N+1 == synchronous snapshot at frame N (pixel-identical, 3 frames);
+  verify 1815/1815, drawn 54.4, unthrottled speed 179% (v1.3 134%, AA synchronous 127%).

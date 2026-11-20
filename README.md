@@ -20,7 +20,9 @@ the game itself (`STUN60_MORPH=0` turns this off).
 redraws every 3D polygon at 3x5 the resolution on a second screen, with the game's colours. Polygon edges are anti-aliased
 (2x2 supersampling of the pixels an edge crosses, so neighbouring polygons stay seamless; `STUN60_HDAA=1` turns it off,
 3 or 4 = finer). The game's scaled 2D sprites (the spark flash when a shot hits, the zooming story panel in the attract
-mode) are redrawn from their source images at HD resolution too. The polygons are drawn by several threads (`STUN60_HDTHREADS`, default half the CPU threads, up to 4). The wireframe the vehicle turns into on a
+mode) are redrawn from their source images at HD resolution too. The polygons are drawn by several threads (`STUN60_HDTHREADS`, default half the CPU threads, up to 4), and the whole HD
+picture is drawn in the background while the next frame is emulated, so it appears one frame (17 ms) after the original
+picture (`STUN60_HDSYNC=1` draws it without that delay, at the cost of emulation speed). The wireframe the vehicle turns into on a
 boost, and scenes drawn entirely as wireframe, are redrawn as smooth thin lines (`STUN60_HDLINE` = line width in HD
 pixels, default 2); the see-through dissolve at the start of a boost is redrawn as a smooth transparent fill. Everything that is not 3D
 (HUD, text) is taken from the original picture and scaled up.
