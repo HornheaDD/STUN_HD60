@@ -62,12 +62,17 @@ Controls and tips
     (the iris gates at the tunnel mouths, the spark burst when a shot hits, the flapping bird,
     the star after a hit, the wobbling drop); they are now morphed shape to shape at 60 fps.
     STUN60_MORPH=0 turns this off.
+  - The pilot walking to his craft at the start glides smoothly (the original moves him in jumps
+    10 times a second); his walking poses still change at the original rate. STUN60_GLIDE=0 turns
+    this off.
   - It needs a reasonably fast CPU: roughly an Intel 8th-gen quad-core laptop chip or better.
-    The HD redraw adds about 2-3 ms of CPU time per frame while the HD picture is shown.
+    The HD picture is drawn on other CPU cores while the game runs, and is shown one frame
+    (17 ms) after the original picture. STUN60_HDSYNC=1 draws it without that delay (slower).
   - The full-screen course map between levels is not upscaled yet (original pixels, scaled).
   - STUN60_HDLINE sets the width of the HD wireframe lines in HD pixels (default 2).
-  - The HD polygon edges are smoothed (anti-aliased). On a slow PC, STUN60_HDAA=1 turns this off
-    and saves some CPU time.
+  - The HD polygon edges are smoothed (anti-aliased), and the game's scaled 2D sprites (the spark
+    flash when a shot hits, the zooming story panel) are redrawn from their source images.
+    On a slow PC, STUN60_HDAA=1 turns the edge smoothing off and saves some CPU time.
   - stun60.log in the data folder shows per-second stats (drawn fps, game ticks, timing).
 
 Credits

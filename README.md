@@ -57,7 +57,7 @@ statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
   centred. Not started yet; it depends on how far the game's own projection and clipping limits can be pushed without
   objects popping in at the edges.
 
-**Download:** [S.T.U.N. Runner HD60 v1.3](https://github.com/HornheaDD/STUN_HD60/releases/latest) for Windows x64 and
+**Download:** [S.T.U.N. Runner HD60 v1.4](https://github.com/HornheaDD/STUN_HD60/releases/latest) for Windows x64 and
 Linux x86-64 (AppImage or tar.gz, about 50 MB each, Real-ESRGAN included).
 The 60 fps-only builds are on the [STUN60 Releases page](https://github.com/HornheaDD/STUN60/releases/latest).
 

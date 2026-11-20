@@ -6,10 +6,12 @@ backups) are in ~/CLAUDE.md on the user's PC and must NOT be copied here. Paths 
 Build tree (not in git): ~/mame/build/mame-mame0285 = MAME 0.285 source + stun60-mame0285.patch. ROMs (not in git): ~/mame/roms.
 
 ## CURRENT STATE (2026-11-20). Start with this section.
-Released: STUN_HD60 **hd-v1.3** (2026-11-20; = hd-v1.2 + model morph: gates, spark burst, bird, star, drip). User confirmed
-the Windows package works on a real Windows PC and played the morph build live ("seems ok").
-- hd-v1.3 = script-only (binaries = v1.1). Packages in package/out-hd/ (v1.2 copies in out-hd-v1.2/). Smoke tests: tar.gz
-  scripted game verify 700/700, AppImage boots (fake HOME), Wine boots; all log "model morph on: gate burst bird star drip".
+Released: STUN_HD60 **hd-v1.4** (2026-11-20): HD anti-aliasing, HD sprites, HD compose pipeline (1 frame HD delay), pilot
+walk glide; new binaries (Linux package build + Windows). Before that hd-v1.3 (model morph, script-only).
+- Packages in package/out-hd/ (v1.3 copies in out-hd-v1.3/; release notes source package/out-hd/notes-v14.md, ignored).
+  Smoke tests: tar.gz scripted verify 700/700 (fake HOME), AppImage boots, fresh-HOME AppImage at normal speed built all 27
+  HD backgrounds (level 1 at 9.7 s, all 39.9 s with the user's browser loading the PC), Wine run 60 s with HD always on:
+  AA 2x2 4 threads, morph on, 198%, clean exit.
 - Verify baseline with the new script: normal course 1774/1774, Advanced 1814/1814 and (fresh nvram, to frame 11000) 1891/1891.
 - Untracked local-only files (keep out of git): hd-experiment/live-hd/Screenshot_*.png, gate-morph-compare.gif,
   wireframe-*-compare.png, wireframe-full-zoom.png.
@@ -19,9 +21,8 @@ the Windows package works on a real Windows PC and played the morph build live (
   reaches the bird at ~frame 8490).
 - Shell gotcha: `pgrep -f X` / `ps | grep X` wait loops match their own bash command line if it contains X. Use a pattern
   that only the MAME process line has, or wait on a PID.
-- **HD anti-aliasing + HD sprites + HD compose pipeline + pilot glide DONE (2026-11-20), local commits, not released** (see "HD anti-aliasing" and "HD sprites"
-  at the end). Next: user plays live, then release as hd-v1.4 (binaries change: rebuild Linux + Windows packages like hd-v1.1).
-  Note: the dev binary build/mame-mame0285/stun60 (= the user's launcher) has both; v1.3 binary kept as build/stun60.v13-binary.
+- Details: "HD anti-aliasing", "HD sprites", "HD compose pipelined", "Pilot walk glide" at the end. v1.3 dev binary kept as
+  build/stun60.v13-binary.
 - Other candidate work (ask the user): HD course map and title screens, HD HUD text, widescreen 16:9 probe.
 - Release recipe for HD60: see "HD packages built and RELEASED" and the hd-v1.1/hd-v1.2 notes at the end.
 
