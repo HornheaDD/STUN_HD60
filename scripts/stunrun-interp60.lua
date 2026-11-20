@@ -562,6 +562,83 @@ local function start_job_2(words)
   W68(0x818018, 0); W68(0x81801A, 0)                     -- release
 end
 -- ---------------------------------------------------------------------------
+-- Blit glide: 2D picture animations (display-list op 8 blits) that the game moves in steps every few ticks, such as the
+-- pilot walking to his craft at the start (7-10 pixels every second tick), glide at 60 fps instead. Each real list's
+-- blits are matched to tracks (same y, nearest x); when a track's x changes, it glides from where it is shown now to the
+-- new x over as many real lists as the previous step lasted (a first step after a rest: 2), real lists and extras alike.
+-- Only pictures up to 256 pixels wide, and only steps of 2+ ticks (anything moving every tick keeps the game's x).
+-- Display only (the game's x is patched in the GSP list); the pictures themselves still change at the game's rate.
+-- Env STUN60_GLIDE=0 off, STUN60_GLIDELOG=1 logs each step.
+local BG = {on = os.getenv("STUN60_GLIDE") ~= "0", log = os.getenv("STUN60_GLIDELOG") == "1", tracks = {}, n = 0, k = 0}
+-- op 8 commands in nwords words from a: 8000, x, y, flags, image address (hi, lo); image = height, width, ...
+local function scan_blits(a, nwords, rel)
+  local out = {}
+  for i = 0, nwords - 6 do
+    local ad = a + 16 * i
+    if gsp:read_u16(ad) == 0x8000 then
+      local y, hi = gsp:read_u16(ad + 32), gsp:read_u16(ad + 64)
+      if y < 0x118 and hi >= 0xFF80 then
+        local img = (hi << 16) | gsp:read_u16(ad + 80)
+        local h, w = gsp:read_u16(img), gsp:read_u16(img + 16)
+        if h >= 1 and h <= 512 and w >= 1 and w <= 1024 then
+          out[#out+1] = {rel = rel, off = i + 1, x = s16(gsp:read_u16(ad + 16)), y = y, w = w}
+        end
+      end
+    end
+  end
+  return out
+end
+local function glide_pos(t, n, tf)
+  local f = math.min(1, (n - t.since + tf) / t.d)
+  return t.from + (t.x - t.from) * f
+end
+-- a real list was published: match its blits to tracks (returns the list's number)
+local function glide_update(blits)
+  BG.n = BG.n + 1
+  local n, used = BG.n, {}
+  for _,b in ipairs(blits) do
+   if b.w <= 256 then                       -- small pictures only (never the 512-wide skyline halves)
+    local best, bd
+    for id, t in pairs(BG.tracks) do
+      if not used[id] and t.y == b.y and n - t.last <= 8 then
+        local dd = math.abs(t.x - b.x)
+        if dd <= 24 and (not bd or dd < bd) then best, bd = id, dd end
+      end
+    end
+    local t = best and BG.tracks[best]
+    if not t then
+      BG.k = BG.k + 1; best = BG.k
+      t = {y = b.y, x = b.x, from = b.x, since = n, d = 2, moving = false}
+      BG.tracks[best] = t
+    elseif b.x ~= t.x then
+      local cur = glide_pos(t, n, 0)
+      t.d = math.max(1, math.min(t.moving and 8 or 2, n - t.since))
+      t.moving = true
+      if t.d < 2 then cur = b.x end          -- moves every tick: keep the game's position (no lag)
+      if BG.log then L(string.format("glide y %d w %d: x %d -> %d over %d lists%s", b.y, b.w, t.x, b.x, t.d, t.d < 2 and " (no glide)" or "")) end
+      t.from, t.x, t.since = cur, b.x, n
+    elseif n - t.since > 8 then
+      t.moving = false
+    end
+    t.last = n; used[best] = true; b.track = t
+   end
+  end
+  for id, t in pairs(BG.tracks) do if n - t.last > 30 then BG.tracks[id] = nil end end
+  return n
+end
+-- write the glide x of each blit (tf = fraction of a tick after real list n); tail = where the tail starts in this list
+local function glide_patch(blits, n, tf, tail)
+  for _,b in ipairs(blits) do
+    local t = b.track
+    if t then
+      local x = math.floor(glide_pos(t, n, tf) + 0.5)
+      local a = (b.rel == "tail") and (tail + 16 * b.off) or b.off
+      if x ~= b.x or tf > 0 then WG(a, x & 0xffff) end
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
 -- GSP list handling
 local function find_block(mb, d2)
   if not d2 or d2 < 2 or d2 > 0x1FFE then return nil end
@@ -651,7 +728,9 @@ local function try_publish(c)
           if RELAX then ok_time = (k == 1) or c.slot[k-1] ~= "raised"
           else ok_time = last_vbl >= c.vb + k - 0.01 end
           if ok_time and gsp:read_u16(c.mb) == 0 then          -- buffer free (previous list on screen)
-            CMD(5, k, c.p >> 16, c.p & 0xffff); WG(c.mb, 0xFFFF); c.slot[k] = "raised"; st.extra = st.extra + 1
+            local nb = CMD(5, k, c.p >> 16, c.p & 0xffff)
+            if c.blits and nb and nb > 0 then glide_patch(c.blits, c.gn, TS[k], c.p + 16 * (nb + 1)) end
+            WG(c.mb, 0xFFFF); c.slot[k] = "raised"; st.extra = st.extra + 1
             if gsp_polling then gsp_polling = false; draw_t0 = t end
             if DBG then L(string.format("raised extra %d at B+%.2f", k, t - c.vb)) end
           end
@@ -831,11 +910,21 @@ local function on_mailbox(o, d)
     return
   end
   local q = p + 16*(d2 + 1)
+  local blits, gn
+  if BG.on then
+    -- blits in the list head (before the 3D block; absolute addresses) and in the tail (offsets from its start)
+    local head = o + 0x10
+    blits = {}
+    for _,b in ipairs(scan_blits(head, (p - head) // 16, "head")) do b.off = head + 16 * (b.off - 1) + 16; blits[#blits+1] = b end
+    for _,b in ipairs(scan_blits(q, 700, "tail")) do blits[#blits+1] = b end
+    gn = glide_update(blits)
+    glide_patch(blits, gn, 0, q)                    -- the real list shows the glide position too
+  end
   CMD(4, q >> 16, q & 0xffff, 700)                  -- capture the HUD tail after the 3D block
   local tl, kof = {}, {}
   if VERIFY then tl[#tl+1] = 0 end
   for k, t in ipairs(TS) do tl[#tl+1] = t; kof[#tl] = k end
-  local c = {mb = o, p = p, d2 = d2, t0 = now(), slot = {},
+  local c = {mb = o, p = p, d2 = d2, t0 = now(), slot = {}, blits = blits, gn = gn,
              tick_owed = false, owns_done = false,
              state = "wait_done", outs = {}, tlist = tl, kof = kof, nj0 = jobcount}
   if drawing_now then c.vb = last_vbl end           -- the GSP was waiting: it starts on R(k) right now

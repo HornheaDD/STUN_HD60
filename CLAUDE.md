@@ -19,7 +19,7 @@ the Windows package works on a real Windows PC and played the morph build live (
   reaches the bird at ~frame 8490).
 - Shell gotcha: `pgrep -f X` / `ps | grep X` wait loops match their own bash command line if it contains X. Use a pattern
   that only the MAME process line has, or wait on a PID.
-- **HD anti-aliasing + HD sprites + HD compose pipeline DONE (2026-11-20), local commits, not released** (see "HD anti-aliasing" and "HD sprites"
+- **HD anti-aliasing + HD sprites + HD compose pipeline + pilot glide DONE (2026-11-20), local commits, not released** (see "HD anti-aliasing" and "HD sprites"
   at the end). Next: user plays live, then release as hd-v1.4 (binaries change: rebuild Linux + Windows packages like hd-v1.1).
   Note: the dev binary build/mame-mame0285/stun60 (= the user's launcher) has both; v1.3 binary kept as build/stun60.v13-binary.
 - Other candidate work (ask the user): HD course map and title screens, HD HUD text, widescreen 16:9 probe.
@@ -702,3 +702,19 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
   synchronous path (no delay).
 - Results: worst second 695 ms; pipelined snapshot at frame N+1 == synchronous snapshot at frame N (pixel-identical, 3 frames);
   verify 1815/1815, drawn 54.4, unthrottled speed 179% (v1.3 134%, AA synchronous 127%).
+
+## Pilot walk glide (2026-11-20, user: "the pilot walking to the vehicle is choppy")
+- The pilot at game start is NOT 3D: a 2D picture animation (display-list op 8 blit, 72 px wide, y 0x8C, images FFE00000..
+  FFE470A0), new image + x step of 7-10 px every 2nd tick (6 frames), same as the arcade. ADSP uploads and ADSP RAM are
+  identical tick to tick in that scene (probes re-probes/flip/jobrec60.lua, adspdiff.lua); ops60.lua logs every drawn list's
+  ops + args (x of op 8 per frame); pilotpolys.lua (op-7 polys in a box) ruled out polygons.
+- Script "Blit glide" block (prev script .v7): at each real publish, op 8 commands are found in the list head (before the
+  7000 block, absolute) and the tail (offset from its start; extras rebuild the tail right after their block, CMD 5 returns
+  its length) by pattern (8000, y < 0x118, image address >= FF800000 with a sane header). Tracks: same y, nearest x (<= 24),
+  pictures <= 256 px wide only. On an x change: glide from the shown position to the new x over d real lists (d = previous
+  step's length, capped 8; first step after a rest 2; d = 1 -> no glide, game x). Display x = from + (x - from) *
+  min(1, (n - since + tf) / d) patched into the real list (tf 0) and each extra (tf = 1/3, 2/3) after CMD 5.
+  Env STUN60_GLIDE=0 off, STUN60_GLIDELOG=1 logs each step.
+- Results: pilot moves 1-2 px per frame instead of 7-10 every 6 (one -5 snap at the very end where the game itself goes
+  68 -> 76 -> 68 within 3 frames). Full runs: normal 3240/3240 (only the 14 pilot steps glide), Advanced 1891/1891 (a 48 px
+  picture at y 3 moving every tick stays unglided). Images still change at the game's 10 Hz.
