@@ -17,6 +17,7 @@ toggle: "looks ok, but I can see some people not liking that option", didn't lik
   package/out-hd/notes-v15.md, ignored). Tests: verify 1815/1815, drawn 51.9 / ticks 19.00 (= v1.4), 160% unthrottled with HD
   always on; Y toggle snapshot check; AppImage fresh HOME: 35 images in 68.5 s, 24 MB, 60 fps / 20 ticks; Windows zip under
   Wine 11 (fresh prefix, launcher): 35 images, byte-identical to the Linux pack, 60 / 20.
+- Pushed (STUN_HD60 main) and released on GitHub; assets re-downloaded, SHA-256 OK. Delivered like v1.4 (where: ~/CLAUDE.md).
 - The user's own ~/mame/hdpack/pack is still S60BG03 (135 MB) until their next launch converts it (automatic).
 - Empty-pack first launch: title/HUD/map + level 1 skyline at ~19 s (skyline alone used to be 3.5 s), all 35 at ~52 s.
 Details: "HD whole screens + xBR text" at the end. Possible follow-ups (ask): story-panel sprite 02 via Real-ESRGAN (its
