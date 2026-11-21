@@ -193,7 +193,7 @@
  #include "machine/timer.h"
  
  #include "sound/dac.h"
-@@ -384,6 +388,86 @@
+@@ -384,6 +388,95 @@
  
  	required_region_ptr<uint16_t> m_sim_memory;
  	uint16_t                m_som_memory[0x8000/2]{};
@@ -221,6 +221,8 @@
 +	// one upscaled image + the palette it was upscaled with (ref); the same pixels can come with several palettes
 +	struct s60hd_bg { uint16_t w, h; uint8_t ref[256][3]; uint32_t palkey; std::vector<uint8_t> used; std::vector<uint32_t> rgb; std::vector<uint8_t> pen; };
 +	std::unordered_map<uint32_t, std::vector<s60hd_bg>> m_hd_bgs;     // pixel key -> palette variants
++	std::vector<uint32_t> m_hd_fskeys;          // keys of whole-screen images (512 x 240/208 at row 0, 512 x 32 = HUD at row 208)
++	uint32_t m_hd_fs_drawn = 0;
 +	void hd_add_bg(uint32_t key, s60hd_bg &&bg);
 +	std::vector<s60hd_blit> m_hd_blits_cur;          // op 8 blits of the list the GSP is drawing
 +	memory_passthrough_handler m_hd_optap;
@@ -236,6 +238,7 @@
 +	void hd_install_optap(s32 param);
 +	bool                    m_hd_optap_on = false;
 +	void hd_draw_bg(bitmap_rgb32 &bitmap, const s60hd_blit &b, const s60hd_bg &bg, int W, int H);
++	void hd_mark_bg(const s60hd_blit &b, const s60hd_bg &bg, int W, int H);
 +	optional_device<screen_device> m_hdscreen;
 +	int                     m_hd_sx = 0, m_hd_sy = 0;
 +	std::shared_ptr<s60hd_list> m_hd_pending, m_hd_shown, m_hd_cur, m_hd_done_list;
@@ -248,6 +251,12 @@
 +	double                  m_hd_linew = 2.0;           // HD wireframe line width in HD pixels (STUN60_HDLINE)
 +	int                     m_hd_aa = 2;                // polygon anti-aliasing: AA x AA samples per HD pixel (STUN60_HDAA, 1 = off)
 +	std::vector<uint32_t>   m_hd_pre;                   // the HD playfield before the polygon pass
++	bool                    m_hd_xbr = true;            // xBR-smoothed 2D (text, HUD numbers, lines) (STUN60_HDXBR=0 = off)
++	std::vector<uint8_t>    m_hd_xm;                    // per HD pixel: 1 = xBR took a neighbour's colour here (HD images keep off)
++	std::vector<uint32_t>   m_hd_lc;                    // low-res colour per pixel (xBR input)
++	std::vector<uint8_t>    m_hd_nf;                    // low-res pixel has a differing (non-3D) neighbour
++	std::vector<uint8_t>    m_hd_img;                   // low-res pixel gets an HD image (background / whole screen)
++	uint32_t                m_hd_xcells = 0;
 +	std::vector<int32_t>    m_hd_eidx;                  // per HD pixel: index into its band's edge pixel list, -1 = not an edge pixel
 +	// per band of HD rows (drawn in parallel): edge pixels (y * width + x), A x A samples each, the polygon spans at the
 +	// A sub-rows of each row (pass 1 -> pass 2), work buffers
@@ -280,7 +289,7 @@
  	uint16_t *              m_adsp_pgm_memory_word = 0;
  
  	uint16_t *              m_ds3_sdata_memory = 0;
-@@ -676,7 +760,7 @@
+@@ -676,7 +769,7 @@
  protected:
  	virtual void device_add_mconfig(machine_config &config) override ATTR_COLD;
  	virtual void device_start() override ATTR_COLD;
@@ -332,7 +341,7 @@
  
  
  
-@@ -450,7 +467,1386 @@
+@@ -450,7 +467,1642 @@
  			color = vram_base[coloridx >> 1];
  		dest[x] = m_gfx_palettebank * 256 + color;
  	}
@@ -416,6 +425,8 @@
 +	m_hd_always = std::getenv("STUN60_HDALWAYS") || std::getenv("STUN60_HDDEBUG");
 +	if (const char *aa = std::getenv("STUN60_HDAA"))
 +		m_hd_aa = std::clamp(std::atoi(aa), 1, 4);
++	if (const char *x = std::getenv("STUN60_HDXBR"))
++		m_hd_xbr = std::atoi(x) != 0;
 +	m_hd_threads = std::clamp(int(std::thread::hardware_concurrency()) / 2, 1, 4);
 +	if (const char *nt = std::getenv("STUN60_HDTHREADS"))
 +		m_hd_threads = std::clamp(std::atoi(nt), 1, 16);
@@ -508,6 +519,8 @@
 +{
 +	bg.used = s60_used_pens(bg.pen);
 +	bg.palkey = s60_palkey(bg.ref, bg.used);
++	if (bg.w == 512 && (bg.h == 240 || bg.h == 208 || bg.h == 32) && std::find(m_hd_fskeys.begin(), m_hd_fskeys.end(), key) == m_hd_fskeys.end())
++		m_hd_fskeys.push_back(key);
 +	std::vector<s60hd_bg> &v = m_hd_bgs[key];
 +	for (s60hd_bg &o : v)
 +		if (o.palkey == bg.palkey && o.w == bg.w && o.h == bg.h) { o = std::move(bg); return; }
@@ -926,38 +939,208 @@
 +			std::memcpy(&bitmap.pix(r * SY + yy), d0, W * SX * sizeof(uint32_t));
 +	}
 +
++	// the palette variant of an HD image closest to the colours on screen now
++	auto pick = [&] (const std::vector<s60hd_bg> &vs, int w, int h) -> const s60hd_bg * {
++		const s60hd_bg *best = nullptr; int bestd = 0;
++		for (const s60hd_bg &v : vs)
++		{
++			if (v.w != w || v.h != h) continue;
++			int d = 0;
++			for (uint8_t p : v.used)
++			{
++				const int pv = bank + p;
++				const rgb_t c = pens[pv < npens ? pv : 0];
++				d += std::abs(c.r() - v.ref[p][0]) + std::abs(c.g() - v.ref[p][1]) + std::abs(c.b() - v.ref[p][2]);
++			}
++			if (!best || d < bestd) { best = &v; bestd = d; }
++		}
++		return best;
++	};
++
++	// 2a. whole-screen images (title, course map, HUD panel...): the game copies them straight into the frame buffer,
++	// so there is no blit to follow. Sample the frame: the best image per screen area (row 0 / the HUD at row 208) whose
++	// pens match at least 60% of the samples is drawn (where the pens match, so text drawn on top stays).
++	m_hd_fs_drawn = 0;
++	std::vector<std::pair<s60hd_blit, const s60hd_bg *>> draws;
++	for (int area = 0; area < 2; area++)
++	{
++		const s60hd_bg *best = nullptr; int bestm = 0, bestrow = 0;
++		for (uint32_t key : m_hd_fskeys)
++		{
++			auto it = m_hd_bgs.find(key);
++			if (it == m_hd_bgs.end() || it->second.empty()) continue;
++			const s60hd_bg &v0 = it->second.front();
++			const int row = v0.h == 32 ? 208 : 0;
++			if ((row != 0) != (area == 1) || row + v0.h > H) continue;
++			const int IW = v0.w * SX;
++			int m = 0, t = 0;
++			for (int r = 1; r < v0.h; r += 3)
++			{
++				const uint16_t *src = &m_hd_done[(row + r) * 512];
++				const uint8_t *prow = &v0.pen[size_t(r) * SY * IW];
++				for (int x = 2; x < W; x += 5, t++)
++					m += (src[x] & 0xff) == prow[x * SX];
++			}
++			if (t && m * 10 >= t * 6 && m * 1000 / t > bestm)
++			{
++				const s60hd_bg *v = pick(it->second, v0.w, v0.h);
++				if (v) { best = v; bestm = m * 1000 / t; bestrow = row; }
++			}
++		}
++		if (best)
++		{
++			s60hd_blit b = {};
++			b.x = 0; b.y = int16_t(0x28 + bestrow); b.w = best->w; b.h = best->h;
++			draws.emplace_back(b, best);
++			m_hd_fs_drawn |= 1u << area;
++		}
++	}
++
 +	// 2b. backgrounds from the HD pack, where the low-res frame really shows them
 +	if (list)
 +		for (const s60hd_blit &b : list->blits)
 +		{
 +			auto it = m_hd_bgs.find(b.key);
 +			if (it == m_hd_bgs.end()) continue;
-+			// the palette variant closest to the colours on screen now
-+			const s60hd_bg *best = nullptr; int bestd = 0;
-+			for (const s60hd_bg &v : it->second)
-+			{
-+				if (v.w != b.w || v.h != b.h) continue;
-+				int d = 0;
-+				for (uint8_t p : v.used)
-+				{
-+					const int pv = bank + p;
-+					const rgb_t c = pens[pv < npens ? pv : 0];
-+					d += std::abs(c.r() - v.ref[p][0]) + std::abs(c.g() - v.ref[p][1]) + std::abs(c.b() - v.ref[p][2]);
-+				}
-+				if (!best || d < bestd) { best = &v; bestd = d; }
-+			}
-+			if (best)
-+				hd_draw_bg(bitmap, b, *best, W, H);
++			if (const s60hd_bg *best = pick(it->second, b.w, b.h))
++				draws.emplace_back(b, best);
 +		}
++	m_hd_img.assign(W * H, 0);
++	for (const auto &d : draws)
++		hd_mark_bg(d.first, *d.second, W, H);
++
++	// 2x. xBR for the 2D the game draws live (text, HUD numbers, the course map's track line, the speed bars): every
++	// non-3D low-res pixel with a differing neighbour gets the xBR edge decisions for its 4 corners (Hyllian's rules,
++	// as in the 4x filter: weighted colour distances over the 5x5 neighbourhood, 45 degree / shallow / steep lines), and
++	// each HD pixel takes the neighbour's colour by its coverage of the decided edge line (analytic, anti-aliased), so it
++	// works at any SX x SY. 3D neighbours count as the pixel's own colour (polygon edges are redrawn in HD anyway).
++	// HD pixels that took a neighbour's colour are marked in m_hd_xm so the HD images below don't paint over them.
++	m_hd_xm.assign(size_t(W) * SX * H * SY, 0);
++	m_hd_xcells = 0;
++	if (m_hd_xbr)
++	{
++		m_hd_lc.resize(W * H);
++		for (int r = 0; r < H; r++)
++			for (int x = 0; x < W; x++)
++				m_hd_lc[r * W + x] = pc(m_hd_done[r * 512 + x]) & 0xffffff;
++		// mark both pixels of every differing neighbour pair (right, down, both diagonals); 3D pixels never differ
++		m_hd_nf.assign(W * H, 0);
++		{
++			const uint32_t *lc = m_hd_lc.data(); const uint8_t *cl = m_hd_cls.data(); uint8_t *nf = m_hd_nf.data();
++			const uint8_t *im = m_hd_img.data();
++			auto is3d = [cl] (int i) { return cl[i] == 1 || cl[i] == 3; };
++			for (int r = 0; r < H; r++)
++				for (int x = 0; x < W; x++)
++				{
++					const int i = r * W + x;
++					if (is3d(i)) continue;
++					// two HD-image pixels never count as different (the image's own detail is upscaled already)
++					auto pair = [&] (int j) { if (!is3d(j) && lc[j] != lc[i] && !(im[i] && im[j])) { nf[i] = 1; nf[j] = 1; } };
++					if (x + 1 < W) pair(i + 1);
++					if (r + 1 < H)
++					{
++						pair(i + W);
++						if (x + 1 < W) pair(i + W + 1);
++						if (x > 0) pair(i + W - 1);
++					}
++				}
++		}
++		auto yuv = [] (uint32_t c, int &y, int &u, int &v) {
++			const int R = (c >> 16) & 0xff, G = (c >> 8) & 0xff, B = c & 0xff;
++			y = (299 * R + 587 * G + 114 * B) / 1000; u = B - y; v = R - y;
++		};
++		auto df = [&] (uint32_t a, uint32_t b) -> int {
++			if (a == b) return 0;
++			int ya, ua, va, yb, ub, vb; yuv(a, ya, ua, va); yuv(b, yb, ub, vb);
++			return 48 * std::abs(ya - yb) + 7 * std::abs(ua - ub) + 6 * std::abs(va - vb);
++		};
++		const int HW = W * SX;
++		for (int r = 0; r < H; r++)
++			for (int x = 0; x < W; x++)
++			{
++				if (!m_hd_nf[r * W + x]) continue;
++				const uint32_t E = m_hd_lc[r * W + x];
++				const bool eimg = m_hd_img[r * W + x];
++				// neighbour colour; outside the screen, 3D, or (seen from an HD-image pixel) another HD-image pixel = E
++				auto g = [&] (int dx, int dy) -> uint32_t {
++					const int xx = x + dx, rr = r + dy;
++					if (xx < 0 || xx >= W || rr < 0 || rr >= H) return E;
++					const int k = rr * W + xx, c = m_hd_cls[k];
++					return (c == 1 || c == 3 || (eimg && m_hd_img[k])) ? E : m_hd_lc[k];
++				};
++				// per corner (mirror mx, my: +1 = right/down): edge line a*u + b*v > c in corner-local coordinates
++				// (u, v in [0,1], 0 = the pixel's far side), colour px; a = 0 means no edge at this corner
++				struct { float a, b, c, s; uint32_t px; } cn[4];
++				int ncn = 0;
++				for (int k = 0; k < 4; k++)
++				{
++					const int mx = (k & 1) ? -1 : 1, my = (k & 2) ? -1 : 1;
++					auto n = [&] (int dx, int dy) { return g(dx * mx, dy * my); };
++					const uint32_t A = n(-1, -1), B = n(0, -1), C = n(1, -1), D = n(-1, 0), F = n(1, 0), G = n(-1, 1), H_ = n(0, 1), I = n(1, 1);
++					const uint32_t C4 = n(2, -1), F4 = n(2, 0), I4 = n(2, 1), G5 = n(-1, 2), H5 = n(0, 2), I5 = n(1, 2);
++					(void)A; (void)C4; (void)G5;
++					if (E == H_ || E == F) continue;
++					const int e = df(E, C) + df(E, G) + df(I, H5) + df(I, F4) + 4 * df(H_, F);
++					const int i = df(H_, D) + df(H_, I5) + df(F, I4) + df(F, B) + 4 * df(E, I);
++					if (e >= i) continue;
++					const uint32_t px = df(E, F) <= df(E, H_) ? F : H_;
++					const bool strong = (F != B && F != C) || (H_ != D && H_ != G) || (E == I && ((F != F4 && F != I4) || (H_ != H5 && H_ != I5))) || E == G || E == C;
++					float a = 1, b = 1, c = 1.5f, st = 1.0f;
++					if (strong)
++					{
++						const int ke = df(F, G), ki = df(H_, C);
++						const bool left = 2 * ke <= ki && E != G && D != G;    // shallow edge (runs on towards G)
++						const bool up = ke >= 2 * ki && E != C && B != C;      // steep edge (runs on towards C)
++						if (left && up) { a = 1; b = 1; c = 1.0f; }
++						else if (left) { a = 0.5f; b = 1; c = 1.0f; }
++						else if (up) { a = 1; b = 0.5f; c = 1.0f; }
++					}
++					else st = 0.5f;      // weak edge: half blend of the corner only
++					// store in screen orientation: u = (mx > 0 ? fx : 1 - fx)
++					cn[ncn].a = a * mx; cn[ncn].b = b * my; cn[ncn].c = c - (mx < 0 ? a : 0) - (my < 0 ? b : 0); cn[ncn].s = st; cn[ncn].px = px;
++					ncn++;
++				}
++				if (!ncn) continue;
++				m_hd_xcells++;
++				for (int yy = 0; yy < SY; yy++)
++				{
++					const float fy = (yy + 0.5f) / SY;
++					uint32_t *d = &bitmap.pix(r * SY + yy) + x * SX;
++					uint8_t *xm = &m_hd_xm[size_t(r * SY + yy) * HW + x * SX];
++					for (int xx = 0; xx < SX; xx++)
++					{
++						const float fx = (xx + 0.5f) / SX;
++						float cr = float((E >> 16) & 0xff), cg = float((E >> 8) & 0xff), cb = float(E & 0xff);
++						bool took = false;
++						for (int k = 0; k < ncn; k++)
++						{
++							const float s = cn[k].a * fx + cn[k].b * fy - cn[k].c;
++							const float fw = 0.5f * (std::fabs(cn[k].a) / SX + std::fabs(cn[k].b) / SY);
++							const float cov = std::clamp((s + fw) / (2 * fw), 0.0f, 1.0f) * cn[k].s;
++							if (cov <= 0) continue;
++							const uint32_t p = cn[k].px;
++							cr += (float((p >> 16) & 0xff) - cr) * cov; cg += (float((p >> 8) & 0xff) - cg) * cov; cb += (float(p & 0xff) - cb) * cov;
++							took = true;
++						}
++						if (!took) continue;
++						d[xx] = 0xff000000 | (uint32_t(cr + 0.5f) << 16) | (uint32_t(cg + 0.5f) << 8) | uint32_t(cb + 0.5f);
++						xm[xx] = 1;
++					}
++				}
++			}
++	}
++
++	for (const auto &d : draws)
++		hd_draw_bg(bitmap, d.first, *d.second, W, H);
 +
 +	auto t1 = std::chrono::steady_clock::now();
 +	if (std::getenv("STUN60_HDDEBUG") && (m_hd_frames % 300) == 0)
 +	{
 +		int c[4] = { 0, 0, 0, 0 };
 +		for (int i = 0; i < W * PLAY; i++) c[m_hd_cls[i]]++;
-+		std::fprintf(stderr, "stun60 HD: frame %u lists %u polys %d playfield px: bg %d 3d %d over %d wire %d; blits %d, HD bg px %u\n",
++		std::fprintf(stderr, "stun60 HD: frame %u lists %u polys %d playfield px: bg %d 3d %d over %d wire %d; blits %d, HD bg px %u, full-screen %u, xBR cells %u\n",
 +				m_hd_frames, m_hd_lists, list ? int(list->polys.size()) : -1, c[0], c[1], c[2], c[3],
-+				list ? int(list->blits.size()) : -1, m_hd_bg_drawn);
++				list ? int(list->blits.size()) : -1, m_hd_bg_drawn, m_hd_fs_drawn, m_hd_xcells);
 +		if (list)
 +			for (const s60hd_blit &b : list->blits)
 +				std::fprintf(stderr, "   blit x %d y %d fl %04X addr %08X %dx%d key %08X %s\n", b.x, b.y, b.flags, b.addr, b.w, b.h, b.key,
@@ -1320,6 +1503,29 @@
 +	}
 +}
 +
++// Mark the low-res pixels where hd_draw_bg will draw this image (same rules, per low-res pixel).
++void harddriv_state::hd_mark_bg(const s60hd_blit &b, const s60hd_bg &bg, int W, int H)
++{
++	const int SX = m_hd_sx, SY = m_hd_sy;
++	const bool transp = b.flags & 0x20;
++	const int IW = bg.w * SX, top = b.y - 0x28 + (b.x < 0 ? 1 : 0);
++	const int r0 = std::max(top, 0), r1 = std::min(top + int(bg.h), H) - 1;
++	const int lx0 = std::max<int>(b.x, 0), lx1 = std::min<int>(b.x + bg.w, W) - 1;
++	for (int r = r0; r <= r1; r++)
++	{
++		const uint16_t *src = &m_hd_done[r * 512];
++		const uint8_t *cls = &m_hd_cls[r * W];
++		const uint8_t *prow = &bg.pen[size_t(r - top) * SY * IW];
++		for (int lx = lx0; lx <= lx1; lx++)
++		{
++			const int c = cls[lx];
++			const uint8_t p = prow[(lx - b.x) * SX];
++			if (c == 2 || (transp && p == 0) || (c == 0 && (src[lx] & 0xff) != p)) continue;
++			m_hd_img[r * W + lx] = 1;
++		}
++	}
++}
++
 +// Draw one HD background image at its blit position. An HD pixel is used where the low-res frame shows this image's pen
 +// at that pixel (so the HUD, text and anything else drawn later stay), or where a 3D polygon covers it (the polygon pass
 +// draws over it; this only shows at the HD polygon edges). Colours follow the live palette: the upscaled colour is
@@ -1366,8 +1572,10 @@
 +				const uint8_t p = prow[ix0];            // the low-res pen of the image at this pixel
 +				if (transp && p == 0) continue;
 +				if (c == 0 && (src[lx] & 0xff) != p) continue;     // something else is on screen here
++				const uint8_t *xm = &m_hd_xm[size_t(Y) * W * SX + lx * SX];
 +				for (int xx = 0; xx < SX; xx++)
 +				{
++					if (xm[xx]) continue;        // xBR-smoothed 2D drawn over the image here
 +					uint32_t v = srow[ix0 + xx];
 +					if (!same)
 +					{
@@ -1401,7 +1609,7 @@
 +
 +namespace {
 +
-+struct s60_img { int stream, index, w, h, prio; bool dark; std::vector<uint8_t> px; uint8_t pal[256][3]; uint32_t key, palkey; std::vector<uint8_t> left, right; int lw, rw; };
++struct s60_img { int stream, index, w, h, prio, pre = 1; bool dark; std::vector<uint8_t> px; uint8_t pal[256][3]; uint32_t key, palkey; std::vector<uint8_t> left, right; int lw, rw; };
 +
 +uint32_t s60_fnv(const uint8_t *p, size_t n)
 +{
@@ -1474,6 +1682,54 @@
 +		ims[i].right = same_h ? r.px : ims[i].px; ims[i].rw = same_h ? r.w : ims[i].w;
 +	}
 +	return ims;
++}
++
++// The header-less streams are whole screens the game copies straight into the frame buffer (no display-list blit):
++// 512 pixels wide, 240, 208 or 32 rows. Seen on screen at row 0 (the HUD panel: row 208). Palettes, found by matching
++// the live palette against the ROM: the level-1 base palette $44630 for everything, the title's own colours (pens
++// 0-223) at $461F0, and the image palette $48068[n] (where there is one) from its first 16-pen block >= 200.
++// prio: the title, HUD and course map go in the builder's first batch (seen within seconds of a first launch).
++std::vector<s60_img> s60_fullscreen_images(const std::vector<uint8_t> &rom)
++{
++	auto l32 = [&rom] (uint32_t a) { return a + 4 <= rom.size() ? (uint32_t(rom[a]) << 24) | (rom[a + 1] << 16) | (rom[a + 2] << 8) | rom[a + 3] : 0u; };
++	static const struct { int n, prio; } FS[] = { { 2, 0 }, { 1, 0 }, { 25, 0 }, { 3, 400 }, { 24, 400 }, { 26, 400 }, { 27, 400 }, { 28, 400 } };
++	std::vector<s60_img> res;
++	if (rom.size() < 0x47406 + 0x300) return res;
++	for (const auto &e : FS)
++	{
++		const uint32_t p = l32(0xbfe00 + 4 * e.n);
++		std::vector<uint8_t> buf;
++		if (!p || p >= rom.size() || !s60_unpack(rom, p, buf)) continue;
++		if (buf.size() & 1) buf.push_back(0);
++		for (size_t i = 0; i + 1 < buf.size(); i += 2) std::swap(buf[i], buf[i + 1]);
++		const int h = int(buf.size() / 512);
++		if (buf.size() % 512 || (h != 240 && h != 208 && h != 32)) continue;   // not a whole-screen image
++		s60_img im;
++		im.stream = e.n; im.index = 0; im.w = 512; im.h = h; im.prio = e.prio;
++		im.pre = 2;     // pixel-doubled before Real-ESRGAN: small lettering stays correct (direct: S -> 9 on the course map)
++		im.px.assign(buf.begin(), buf.end());
++		im.key = s60_fnv(im.px.data(), im.px.size());
++		std::memcpy(im.pal, &rom[0x44630], 768);
++		const std::vector<uint8_t> used = s60_used_pens(im.px);
++		if (used.empty()) continue;
++		if (e.n == 2) std::memcpy(im.pal, &rom[0x461f0], 224 * 3);
++		const uint32_t ip = l32(0x48068 + 4 * e.n);
++		// the image palette starts at the 16-pen block of its first pen >= 200 (s25: 224, s26-28: 208, s3: 240); lower
++		// pens come from the base palette (s25's pen 29 is a flashing light)
++		int p0 = 256;
++		for (uint8_t q : used) if (q >= 200) { p0 = q & ~15; break; }
++		if (ip && p0 < 256 && ip + (256 - p0) * 3 <= rom.size()) std::memcpy(im.pal[p0], &rom[ip], (256 - p0) * 3);
++		im.palkey = s60_palkey(im.pal, used);
++		size_t darkpx = 0;
++		for (uint8_t q : im.px) darkpx += std::max({ im.pal[q][0], im.pal[q][1], im.pal[q][2] }) < 48;
++		im.dark = darkpx * 2 > im.px.size();
++		// padding for the upscaler: repeat the edge columns (these are not panoramas)
++		im.lw = im.rw = 1;
++		im.left.resize(h); im.right.resize(h);
++		for (int y = 0; y < h; y++) { im.left[y] = im.px[y * 512]; im.right[y] = im.px[y * 512 + 511]; }
++		res.push_back(std::move(im));
++	}
++	return res;
 +}
 +
 +// Every background the game shows, with the palette it is shown with, in play order. Per level L (ROM tables):
@@ -1572,15 +1828,16 @@
 +
 +bool s60_write_png(const std::filesystem::path &path, const s60_img &im, int pad)
 +{
-+	const int W = im.w + 2 * pad, H = im.h + 2 * pad;
-+	bitmap_rgb32 bm(W, H);
-+	for (int y = 0; y < H; y++)
-+		for (int x = 0; x < W; x++)
++	const int W = im.w + 2 * pad, H = im.h + 2 * pad, k = im.pre;
++	bitmap_rgb32 bm(W * k, H * k);
++	for (int Y = 0; Y < H * k; Y++)
++		for (int X = 0; X < W * k; X++)
 +		{
++			const int y = Y / k, x = X / k;
 +			const int sy = std::clamp(y - pad, 0, im.h - 1), sx = x - pad;
-+			const uint8_t p = sx < 0 ? im.left[sy * im.lw + im.lw + sx] : sx >= im.w ? im.right[sy * im.rw + sx - im.w] : im.px[sy * im.w + sx];
++			const uint8_t p = sx < 0 ? im.left[sy * im.lw + std::max(im.lw + sx, 0)] : sx >= im.w ? im.right[sy * im.rw + std::min(sx - im.w, im.rw - 1)] : im.px[sy * im.w + sx];
 +			const uint8_t *c = im.pal[p];
-+			bm.pix(y, x) = rgb_t(0xff, c[0], c[1], c[2]);
++			bm.pix(Y, X) = rgb_t(0xff, c[0], c[1], c[2]);
 +		}
 +	util::core_file::ptr f;
 +	if (util::core_file::open(path.string(), OPEN_FLAG_WRITE | OPEN_FLAG_CREATE, f)) return false;
@@ -1600,8 +1857,15 @@
 +	const int PAD = 16;
 +	const auto t0 = std::chrono::steady_clock::now();
 +	auto secs = [&t0] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
-+	std::vector<s60_img> todo;
-+	for (auto &im : s60_find_images(rom))
++	std::vector<s60_img> todo, all = s60_fullscreen_images(rom), bgs = s60_find_images(rom);
++	// whole screens (title, HUD, course map) share the first batch with level 1's skyline (prio 0); the rest go last
++	std::stable_partition(all.begin(), all.end(), [] (const s60_img &i) { return i.prio == 0; });
++	auto split = std::find_if(all.begin(), all.end(), [] (const s60_img &i) { return i.prio != 0; });
++	std::vector<s60_img> late(std::make_move_iterator(split), std::make_move_iterator(all.end()));
++	all.erase(split, all.end());
++	for (auto &im : bgs) all.push_back(std::move(im));
++	for (auto &im : late) all.push_back(std::move(im));
++	for (auto &im : all)
 +		if (std::find(have.begin(), have.end(), (uint64_t(im.key) << 32) | im.palkey) == have.end())
 +			todo.push_back(std::move(im));
 +	{ std::lock_guard<std::mutex> g(st->lock); st->total = int(todo.size()); }
@@ -1631,15 +1895,16 @@
 +			if (util::core_file::open((work / "out" / util::string_format("%d.png", int(i))).string(), OPEN_FLAG_READ, f) || util::png_read_bitmap(*f, up))
 +				continue;
 +			const int W = im.w + 2 * PAD, H = im.h + 2 * PAD;
-+			if (up.width() != 4 * W || up.height() != 4 * H) continue;
-+			std::vector<float> src(size_t(4 * W) * 4 * H * 3), dst;
-+			for (int y = 0; y < 4 * H; y++)
-+				for (int x = 0; x < 4 * W; x++)
++			const int UW = 4 * im.pre * W, UH = 4 * im.pre * H;
++			if (up.width() != UW || up.height() != UH) continue;
++			std::vector<float> src(size_t(UW) * UH * 3), dst;
++			for (int y = 0; y < UH; y++)
++				for (int x = 0; x < UW; x++)
 +				{
-+					const rgb_t c = up.pix(y, x); float *d = &src[(size_t(y) * 4 * W + x) * 3];
++					const rgb_t c = up.pix(y, x); float *d = &src[(size_t(y) * UW + x) * 3];
 +					d[0] = c.r(); d[1] = c.g(); d[2] = c.b();
 +				}
-+			s60_resample(src, 4 * W, 4 * H, dst, W * SX, H * SY);
++			s60_resample(src, UW, UH, dst, W * SX, H * SY);
 +			harddriv_state::s60hd_bg bg;
 +			bg.w = im.w; bg.h = im.h;
 +			std::memcpy(bg.ref, im.pal, sizeof(bg.ref));

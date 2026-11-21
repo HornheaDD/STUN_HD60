@@ -5,9 +5,14 @@ the older https://github.com/HornheaDD/STUN60 = 60 fps-only v1.0, frozen). Machi
 backups) are in ~/CLAUDE.md on the user's PC and must NOT be copied here. Paths below assume the repo is ~/mame.
 Build tree (not in git): ~/mame/build/mame-mame0285 = MAME 0.285 source + stun60-mame0285.patch. ROMs (not in git): ~/mame/roms.
 
-## CURRENT STATE (2026-11-20, evening: PAUSED, user taking a break). Start with this section.
-Nothing in progress. Next work only when the user picks it: HD course map / title screens, HD HUD text, widescreen 16:9 probe.
-Released: STUN_HD60 **hd-v1.4** (2026-11-20): HD anti-aliasing, HD sprites, HD compose pipeline (1 frame HD delay), pilot
+## CURRENT STATE (2026-11-21). Start with this section.
+**HD title / course map / HUD + xBR text DONE (2026-11-21), local commit only, not released, not pushed.** User to try it
+live (run-stun60.sh builds the 8 new images into hdpack/pack on the first launch: title/HUD/map ~18 s, rest ~13 s more).
+Empty-pack first launch: title/HUD/map + level 1 skyline at 18.8 s (skyline was 3.5 s before), all 35 at 51.6 s, 135 MB.
+Details: "HD whole screens + xBR text" at the end. Possible follow-ups (ask): story-panel sprite 02 via Real-ESRGAN (its
+text is still resampled source pixels), xBR look of the HUD "0" digits (pointy tips), python build_pack.py parity,
+release hd-v1.5 (binaries change: Linux + Windows rebuild).
+Released before: STUN_HD60 **hd-v1.4** (2026-11-20): HD anti-aliasing, HD sprites, HD compose pipeline (1 frame HD delay), pilot
 walk glide; new binaries (Linux package build + Windows). Before that hd-v1.3 (model morph, script-only).
 - Packages in package/out-hd/ (v1.3 copies in out-hd-v1.3/; release notes source package/out-hd/notes-v14.md, ignored).
   Smoke tests: tar.gz scripted verify 700/700 (fake HOME), AppImage boots, fresh-HOME AppImage at normal speed built all 27
@@ -24,7 +29,7 @@ walk glide; new binaries (Linux package build + Windows). Before that hd-v1.3 (m
   that only the MAME process line has, or wait on a PID.
 - Details: "HD anti-aliasing", "HD sprites", "HD compose pipelined", "Pilot walk glide" at the end. v1.3 dev binary kept as
   build/stun60.v13-binary.
-- Other candidate work (ask the user): HD course map and title screens, HD HUD text, widescreen 16:9 probe.
+- Other candidate work (ask the user): widescreen 16:9 probe.
 - Release recipe for HD60: see "HD packages built and RELEASED" and the hd-v1.1/hd-v1.2 notes at the end.
 
 ## Earlier pause (2026-11-18, evening), history
@@ -720,3 +725,30 @@ Older status (2026-11-15, user taking a break to decide). Two options were prese
 - Results: pilot moves 1-2 px per frame instead of 7-10 every 6 (one -5 snap at the very end where the game itself goes
   68 -> 76 -> 68 within 3 frames). Full runs: normal 3240/3240 (only the 14 pilot steps glide), Advanced 1891/1891 (a 48 px
   picture at y 3 moving every tick stays unglided). Images still change at the game's 10 Hz.
+
+## HD whole screens + xBR text (2026-11-21, user: "upscale the title screen, the screens between levels, and the HUD")
+- User's look choice (sample sheets in scratch: nearest / xBR / hqx / 3 Real-ESRGAN models): Real-ESRGAN for the images
+  (title, course map, HUD panel), xBR for the text the game draws. Direct Real-ESRGAN turned small "S" into "9" on the course
+  map; pixel-doubling the input first (s60_img.pre = 2) fixes it.
+- The header-less streams are whole screens copied straight into the frame buffer (no display-list op, so no blit to follow):
+  s1 HUD panel 512x32 (screen row 208), s2 title 512x240, s3 FBI seal, s24 starfield, s25 course map 512x208 (grid, legend,
+  circuit panel; track line + text drawn live), s26-28 high-score / story frames (240). Palettes found by matching the live
+  palette (re-probes: scratch paldump.lua; palette = first of manager.machine.palettes, 1024 entries) against the ROM: base =
+  level-1 base palette $44630; title pens 0-223 at $461F0; image palette $48068[n] from the 16-pen block of the first used pen
+  >= 200 (s25: 224, s26-28: 208, s3: 240). Pens 16 / 29 cycle (flashing), the live re-tint handles them.
+- Builder: s60_fullscreen_images(); title/HUD/map share batch 1 with level 1's skyline, the other 5 go last. Edge padding =
+  repeated edge columns (left/right index clamped). Measured first launch: batch 1 ~18 s (was 3.5 s skyline-only; the 2x
+  input costs it), last batch 13 s. Pack 75 -> 135 MB, 35 images.
+- Compose (harddriv_v.cpp): hd_add_bg remembers whole-screen keys (512 x 240/208/32). Step 2a samples the frame (every 3rd
+  row, 5th column) per area (row 0 / row 208), best image with >= 60% pen match is drawn via hd_draw_bg (synthetic blit
+  x 0, y 0x28 + row). Matches: title 97%, HUD 93%, map 100% (rest = text on top). Order now: pick bgs (2a + 2b) ->
+  hd_mark_bg (m_hd_img per low-res pixel) -> xBR -> hd_draw_bg.
+- xBR (step 2x, STUN60_HDXBR=0 off): low-res pixels with a differing non-3D neighbour (pair pass, m_hd_nf; two HD-image
+  pixels never differ) get Hyllian's 4x-filter corner rules (YUV distance 48/7/6, e < i, strong/weak, shallow/steep);
+  each HD pixel blends to the corner colour by analytic coverage of the edge line (45: u+v>1.5, shallow u/2+v>1,
+  steep u+v/2>1, both u+v>1; AA width from SX/SY). 3D neighbours = own colour. HD pixels that took a neighbour colour are
+  marked (m_hd_xm) and hd_draw_bg skips them (smooth text over HD images).
+- Cost (HDDEBUG "classify+scale"): gameplay ~3.5 ms (before ~2.3), title/map screens ~7 ms (no 3D there). Verify 1815/1815
+  exact, drawn 51.9 / ticks 19.00 = identical to the v1.4 binary on the same run; unthrottled speed 177% -> 160% (HD always on).
+- Test notes: re-probes/flip/snap.lua does NOT load the 60 fps script (HD only); ab_test.lua does. Always set STUN60_LOG
+  in tests (default log = ~/mame/stun60.log, the user's live log; overwritten by test runs on 2026-11-21).

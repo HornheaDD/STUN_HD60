@@ -35,17 +35,21 @@ your own `stunrun.zip`.
 What happens on first launch:
 
 * The game starts **immediately**, at 60 fps with the HD 3D scene; the skylines show the original pixels at first.
-* In the background, at the lowest priority, the game unpacks the backgrounds from the ROM and upscales them (27 images, including the level-start city screens).
+* In the background, at the lowest priority, the game unpacks the backgrounds from the ROM and upscales them (35 images, including the level-start city screens, the title screen, course map and HUD).
   Level 1's skyline comes first. Each skyline switches to HD on its own as soon as it is ready; no restart is needed.
-* On a gaming graphics card this takes about 25 seconds in total (level 1 after a few seconds), so it is done before you
-  have inserted a coin. A slower graphics card only means the original skylines stay a little longer.
-* The finished pack is saved in the game's data folder (about 75 MB), so later launches are HD from the start.
+* On a gaming graphics card this takes about 50 seconds in total; the title screen, HUD, course map and level 1's skyline
+  are ready after about 20 seconds. A slower graphics card only means the original pictures stay a little longer.
+* The finished pack is saved in the game's data folder (about 135 MB), so later launches are HD from the start.
 * Real-ESRGAN needs a graphics card with Vulkan support. Without it, the game keeps the original skylines and notes this in
   its log; nothing else changes.
 
 The colours follow the game's live palette, so fades still work, and anything drawn over a skyline (HUD, text) stays as in
 the original. The level-start city screens are upscaled the same way (night scenes use the `realesr-animevideov3` model,
-which keeps the small window lights).
+which keeps the small window lights). So are the full-screen pictures: the title screen, the course map shown between
+levels, the HUD panel and the high-score frame (the pixels are doubled before upscaling, which keeps small lettering correct).
+
+**Smooth 2D:** text, HUD numbers, the course map's track line and the speed bars are drawn live by the game; in HD they
+are smoothed with the xBR pixel-art filter (`STUN60_HDXBR=0` turns it off).
 
 Also included: an optional CRT look (MAME BGFX `crt-geom` shaders, toggled in-game with **C**), an on-screen
 statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
