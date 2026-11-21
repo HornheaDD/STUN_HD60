@@ -7,7 +7,8 @@ The game's own 3D chip renders two extra in-between frames per game tick, with t
 and objects interpolated, so the motion is real 60 fps (not blended frames).
 The 3D scene is redrawn in high resolution (1536x1200) from the game's own polygon data (including
 the wireframe the craft turns into on a boost and the all-wireframe sections), and the skyline
-backgrounds are the game's own artwork upscaled with an AI upscaler (see below).
+backgrounds, title screen, course map and HUD panel are the game's own artwork upscaled with an AI
+upscaler (see below); text and HUD numbers are smoothed with the xBR pixel-art filter.
 H switches between the HD picture and the original 512x240 one at any time.
 Optional CRT look (scanlines, shadow mask, glow) via MAME's BGFX shaders.
 
@@ -18,12 +19,13 @@ HD backgrounds: what happens on first launch
   stunrun.zip, the first time you start the game. You don't have to wait for it:
   - The game starts immediately; the skylines show the original pixels at first.
   - In the background (lowest priority, so the game keeps its speed) the backgrounds are unpacked
-    from the ROM and upscaled with Real-ESRGAN (27 images). Level 1's skyline comes first; each one
-    switches to HD by itself as soon as it is ready. No restart needed.
-  - On a gaming graphics card this takes about 25 seconds in total (level 1 after about 5), so it
-    is done before you have put a coin in. A slower graphics card only means the original skylines
-    stay a little longer.
-  - The result (about 75 MB) is saved in the data folder (hdpack), so later launches are HD from
+    from the ROM and upscaled with Real-ESRGAN (35 images). The title screen, HUD, course map and
+    level 1's skyline come first; each one switches to HD by itself as soon as it is ready. No
+    restart needed.
+  - On a gaming graphics card this takes about 50 seconds in total (the first batch after about
+    20), so it is done before you have put a coin in. A slower graphics card only means the
+    original pictures stay a little longer.
+  - The result (about 25 MB) is saved in the data folder (hdpack), so later launches are HD from
     the start. Delete that folder to rebuild it.
   - Real-ESRGAN needs a graphics card with Vulkan support (any recent NVIDIA, AMD or Intel driver).
     Without it the game keeps the original skylines; everything else works the same. The reason is
@@ -49,6 +51,8 @@ Windows (64-bit, Windows 10 or 11)
 Controls and tips
   - MAME's normal controls (5 = coin, 1 = start, Tab = MAME menu, Esc = quit).
   - H switches between the HD picture and the original resolution. The choice is remembered.
+  - Y turns the HD title screen, course map, HUD panel and smoothed text off (original pixels,
+    scaled up) and on again. The 3D scene and skylines stay HD. The choice is remembered.
   - O cycles the on-screen overlay: small (fps) / full (stats) / off. The choice is remembered.
   - C cycles the screen effect: CRT scanlines (deluxe) / CRT scanlines (sharp) / off.
     The choice is remembered. The first launch starts with CRT deluxe.

@@ -39,7 +39,7 @@ What happens on first launch:
   Level 1's skyline comes first. Each skyline switches to HD on its own as soon as it is ready; no restart is needed.
 * On a gaming graphics card this takes about 50 seconds in total; the title screen, HUD, course map and level 1's skyline
   are ready after about 20 seconds. A slower graphics card only means the original pictures stay a little longer.
-* The finished pack is saved in the game's data folder (about 135 MB), so later launches are HD from the start.
+* The finished pack is saved in the game's data folder (about 25 MB), so later launches are HD from the start.
 * Real-ESRGAN needs a graphics card with Vulkan support. Without it, the game keeps the original skylines and notes this in
   its log; nothing else changes.
 
@@ -51,12 +51,14 @@ levels, the HUD panel and the high-score frame (the pixels are doubled before up
 **Smooth 2D:** text, HUD numbers, the course map's track line and the speed bars are drawn live by the game; in HD they
 are smoothed with the xBR pixel-art filter (`STUN60_HDXBR=0` turns it off).
 
+Press **Y** in-game to turn the HD title screen, course map, HUD panel and the smoothed text off (the original pixels,
+scaled up, as before) and on again; the choice is remembered. The 3D scene and the skylines stay HD.
+
 Also included: an optional CRT look (MAME BGFX `crt-geom` shaders, toggled in-game with **C**), an on-screen
 statistics overlay (**O**), and portable Linux (AppImage) and Windows packages.
 
 **Planned:**
 
-* HD versions of the full-screen course map and title images.
 * Possibly a **widescreen (16:9) hack**: widening the game's 3D view so it fills modern screens, with the HUD kept
   centred. Not started yet; it depends on how far the game's own projection and clipping limits can be pushed without
   objects popping in at the edges.

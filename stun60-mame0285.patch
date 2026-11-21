@@ -193,7 +193,7 @@
  #include "machine/timer.h"
  
  #include "sound/dac.h"
-@@ -384,6 +388,95 @@
+@@ -384,6 +388,96 @@
  
  	required_region_ptr<uint16_t> m_sim_memory;
  	uint16_t                m_som_memory[0x8000/2]{};
@@ -251,6 +251,7 @@
 +	double                  m_hd_linew = 2.0;           // HD wireframe line width in HD pixels (STUN60_HDLINE)
 +	int                     m_hd_aa = 2;                // polygon anti-aliasing: AA x AA samples per HD pixel (STUN60_HDAA, 1 = off)
 +	std::vector<uint32_t>   m_hd_pre;                   // the HD playfield before the polygon pass
++	bool                    m_hd_2d = true;             // HD 2D extras: whole-screen images + xBR (Y key in the script: output stun60_hd2d_off)
 +	bool                    m_hd_xbr = true;            // xBR-smoothed 2D (text, HUD numbers, lines) (STUN60_HDXBR=0 = off)
 +	std::vector<uint8_t>    m_hd_xm;                    // per HD pixel: 1 = xBR took a neighbour's colour here (HD images keep off)
 +	std::vector<uint32_t>   m_hd_lc;                    // low-res colour per pixel (xBR input)
@@ -289,7 +290,7 @@
  	uint16_t *              m_adsp_pgm_memory_word = 0;
  
  	uint16_t *              m_ds3_sdata_memory = 0;
-@@ -676,7 +769,7 @@
+@@ -676,7 +770,7 @@
  protected:
  	virtual void device_add_mconfig(machine_config &config) override ATTR_COLD;
  	virtual void device_start() override ATTR_COLD;
@@ -317,7 +318,7 @@
  uint16_t harddriv_state::hd68k_port0_r()
 --- a/src/mame/atari/harddriv_v.cpp
 +++ b/src/mame/atari/harddriv_v.cpp
-@@ -9,6 +9,23 @@
+@@ -9,6 +9,25 @@
  #include "emu.h"
  #include "cpu/tms34010/tms34010.h"
  #include "harddriv.h"
@@ -333,6 +334,8 @@
 +#include <fstream>
 +#include <set>
 +#include <thread>
++
++#include <zlib.h>
 +#if defined(_WIN32)
 +#include <windows.h>
 +#else
@@ -341,7 +344,7 @@
  
  
  
-@@ -450,7 +467,1642 @@
+@@ -450,7 +469,1702 @@
  			color = vram_base[coloridx >> 1];
  		dest[x] = m_gfx_palettebank * 256 + color;
  	}
@@ -483,6 +486,76 @@
 +	std::fprintf(stderr, "stun60: HD background blit recorder on\n");
 +}
 +
++namespace {
++
++// HD pack file: "S60BG04", key, w, h, SX, SY, the reference palette, then (zlib) the HD image as planes: red, green,
++// blue, pen. "S60BG03" (older, uncompressed: ARGB words, then pens) is still read; the builder rewrites those as 04.
++bool s60_read_bg(const std::filesystem::path &path, int want_sx, int want_sy, uint32_t &key, harddriv_state::s60hd_bg &bg, bool *old = nullptr)
++{
++	std::ifstream f(path, std::ios::binary);
++	char magic[8]; uint16_t w, h, sx, sy;
++	if (!f.read(magic, 8)) return false;
++	const bool v3 = !std::memcmp(magic, "S60BG03", 8), v4 = !std::memcmp(magic, "S60BG04", 8);
++	if (!v3 && !v4) return false;                                          // older packs are rebuilt
++	if (old) *old = v3;
++	f.read(reinterpret_cast<char *>(&key), 4); f.read(reinterpret_cast<char *>(&w), 2); f.read(reinterpret_cast<char *>(&h), 2);
++	f.read(reinterpret_cast<char *>(&sx), 2); f.read(reinterpret_cast<char *>(&sy), 2);
++	if (!f || (want_sx && (sx != want_sx || sy != want_sy)) || !w || !h || w > 1024 || h > 512) return false;
++	bg.w = w; bg.h = h;
++	f.read(reinterpret_cast<char *>(bg.ref), sizeof(bg.ref));
++	const size_t n = size_t(w) * sx * h * sy;
++	bg.rgb.resize(n); bg.pen.resize(n);
++	if (v3)
++	{
++		f.read(reinterpret_cast<char *>(bg.rgb.data()), n * 4);
++		f.read(reinterpret_cast<char *>(bg.pen.data()), n);
++		return bool(f);
++	}
++	uint32_t clen = 0;
++	f.read(reinterpret_cast<char *>(&clen), 4);
++	if (!f || clen > n * 5) return false;
++	std::vector<uint8_t> c(clen), raw(n * 4);
++	if (!f.read(reinterpret_cast<char *>(c.data()), clen)) return false;
++	uLongf rl = uLongf(raw.size());
++	if (uncompress(raw.data(), &rl, c.data(), clen) != Z_OK || rl != raw.size()) return false;
++	for (size_t i = 0; i < n; i++)
++		bg.rgb[i] = 0xff000000 | (uint32_t(raw[i]) << 16) | (uint32_t(raw[n + i]) << 8) | raw[2 * n + i];
++	std::memcpy(bg.pen.data(), &raw[3 * n], n);
++	return true;
++}
++
++// write a temporary file, then rename it, so a half-written pack file is never loaded
++bool s60_write_bg(const std::filesystem::path &path, uint32_t key, int sx, int sy, const harddriv_state::s60hd_bg &bg)
++{
++	const size_t n = bg.pen.size();
++	std::vector<uint8_t> raw(n * 4);
++	for (size_t i = 0; i < n; i++)
++	{
++		const uint32_t c = bg.rgb[i];
++		raw[i] = uint8_t(c >> 16); raw[n + i] = uint8_t(c >> 8); raw[2 * n + i] = uint8_t(c);
++	}
++	std::memcpy(&raw[3 * n], bg.pen.data(), n);
++	uLongf cl = compressBound(uLong(raw.size()));
++	std::vector<uint8_t> c(cl);
++	if (compress2(c.data(), &cl, raw.data(), uLong(raw.size()), 6) != Z_OK) return false;
++	const std::filesystem::path tmpp = path.string() + ".tmp";
++	{
++		std::ofstream o(tmpp, std::ios::binary);
++		const uint16_t hdr[4] = { bg.w, bg.h, uint16_t(sx), uint16_t(sy) };
++		const uint32_t clen = uint32_t(cl);
++		o.write("S60BG04", 8); o.write(reinterpret_cast<const char *>(&key), 4); o.write(reinterpret_cast<const char *>(hdr), 8);
++		o.write(reinterpret_cast<const char *>(bg.ref), sizeof(bg.ref));
++		o.write(reinterpret_cast<const char *>(&clen), 4);
++		o.write(reinterpret_cast<const char *>(c.data()), cl);
++		if (!o) return false;
++	}
++	std::error_code ec;
++	std::filesystem::rename(tmpp, path, ec);
++	return !ec;
++}
++
++} // anonymous namespace
++
 +// Load the HD background pack: every .s60bg file in $STUN60_HDPACK made for this SX x SY.
 +void harddriv_state::hd_load_pack()
 +{
@@ -494,20 +567,8 @@
 +	{
 +		if (e.path().extension() != ".s60bg")
 +			continue;
-+		std::ifstream f(e.path(), std::ios::binary);
-+		char magic[8]; uint32_t key; uint16_t w, h, sx, sy;
-+		if (!f.read(magic, 8) || std::memcmp(magic, "S60BG03", 8)) continue;     // older packs are rebuilt
-+		f.read(reinterpret_cast<char *>(&key), 4); f.read(reinterpret_cast<char *>(&w), 2); f.read(reinterpret_cast<char *>(&h), 2);
-+		f.read(reinterpret_cast<char *>(&sx), 2); f.read(reinterpret_cast<char *>(&sy), 2);
-+		if (!f || sx != m_hd_sx || sy != m_hd_sy || !w || !h || w > 1024 || h > 512) continue;
-+		s60hd_bg bg;
-+		bg.w = w; bg.h = h;
-+		f.read(reinterpret_cast<char *>(bg.ref), sizeof(bg.ref));
-+		const size_t n = size_t(w) * sx * h * sy;
-+		bg.rgb.resize(n); bg.pen.resize(n);
-+		f.read(reinterpret_cast<char *>(bg.rgb.data()), n * 4);
-+		f.read(reinterpret_cast<char *>(bg.pen.data()), n);
-+		if (!f) continue;
++		uint32_t key; s60hd_bg bg;
++		if (!s60_read_bg(e.path(), m_hd_sx, m_hd_sy, key, bg)) continue;
 +		hd_add_bg(key, std::move(bg));
 +	}
 +	size_t n = 0;
@@ -728,6 +789,7 @@
 +			const rgb_t *pens = m_palette->palette()->entry_list_adjusted();   // colours (pens() would give indices)
 +			m_hd_pal.assign(pens, pens + m_palette->entries());
 +			m_hd_bank = m_gfx_palettebank;
++			m_hd_2d = machine().output().get_value("stun60_hd2d_off") == 0;
 +			if (m_hd_sync)
 +			{
 +				// compose now, so the HD screen shows this frame (its own refresh comes slightly earlier)
@@ -962,7 +1024,7 @@
 +	// pens match at least 60% of the samples is drawn (where the pens match, so text drawn on top stays).
 +	m_hd_fs_drawn = 0;
 +	std::vector<std::pair<s60hd_blit, const s60hd_bg *>> draws;
-+	for (int area = 0; area < 2; area++)
++	for (int area = 0; area < (m_hd_2d ? 2 : 0); area++)
 +	{
 +		const s60hd_bg *best = nullptr; int bestm = 0, bestrow = 0;
 +		for (uint32_t key : m_hd_fskeys)
@@ -1017,7 +1079,7 @@
 +	// HD pixels that took a neighbour's colour are marked in m_hd_xm so the HD images below don't paint over them.
 +	m_hd_xm.assign(size_t(W) * SX * H * SY, 0);
 +	m_hd_xcells = 0;
-+	if (m_hd_xbr)
++	if (m_hd_xbr && m_hd_2d)
 +	{
 +		m_hd_lc.resize(W * H);
 +		for (int r = 0; r < H; r++)
@@ -1870,6 +1932,17 @@
 +			todo.push_back(std::move(im));
 +	{ std::lock_guard<std::mutex> g(st->lock); st->total = int(todo.size()); }
 +	std::error_code ec;
++	// pack files from before v1.5 (uncompressed, 3x the size): rewrite them compressed (same images)
++	{
++		int conv = 0;
++		for (const auto &e : fs::directory_iterator(pack, ec))
++		{
++			if (e.path().extension() != ".s60bg") continue;
++			uint32_t key; harddriv_state::s60hd_bg bg; bool old = false;
++			if (s60_read_bg(e.path(), SX, SY, key, bg, &old) && old && s60_write_bg(e.path(), key, SX, SY, bg)) conv++;
++		}
++		if (conv) std::fprintf(stderr, "stun60: HD pack: %d older files rewritten compressed (%.1f s)\n", conv, secs());
++	}
 +	const fs::path work = fs::path(pack) / "_work";
 +	if (todo.empty() || !fs::exists(exe, ec)) { std::lock_guard<std::mutex> g(st->lock); st->finished = true; return; }
 +	std::fprintf(stderr, "stun60: building %d HD backgrounds in the background (%s)\n", int(todo.size()), exe.c_str());
@@ -1918,17 +1991,7 @@
 +					bg.rgb[size_t(y) * IW + x] = 0xff000000 | (q(c[0]) << 16) | (q(c[1]) << 8) | q(c[2]);
 +					bg.pen[size_t(y) * IW + x] = im.px[(y / SY) * im.w + x / SX];
 +				}
-+			// save (write a temporary file, then rename, so a half-written pack file is never loaded)
-+			const fs::path dstp = fs::path(pack) / util::string_format("s%02d_%d_%08x.s60bg", im.stream, im.index, im.palkey), tmpp = dstp.string() + ".tmp";
-+			{
-+				std::ofstream o(tmpp, std::ios::binary);
-+				const uint16_t hdr[4] = { uint16_t(im.w), uint16_t(im.h), uint16_t(SX), uint16_t(SY) };
-+				o.write("S60BG03", 8); o.write(reinterpret_cast<const char *>(&im.key), 4); o.write(reinterpret_cast<const char *>(hdr), 8);
-+				o.write(reinterpret_cast<const char *>(bg.ref), sizeof(bg.ref));
-+				o.write(reinterpret_cast<const char *>(bg.rgb.data()), bg.rgb.size() * 4);
-+				o.write(reinterpret_cast<const char *>(bg.pen.data()), bg.pen.size());
-+			}
-+			fs::rename(tmpp, dstp, ec);
++			s60_write_bg(fs::path(pack) / util::string_format("s%02d_%d_%08x.s60bg", im.stream, im.index, im.palkey), im.key, SX, SY, bg);
 +			std::lock_guard<std::mutex> g(st->lock);
 +			st->ready.emplace_back(im.key, std::move(bg));
 +			st->done++;

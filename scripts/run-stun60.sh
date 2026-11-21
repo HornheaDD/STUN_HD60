@@ -5,7 +5,7 @@
 #   Tab > Slider Controls > "Window 0, Screen 0 Effect" (crt-geom-deluxe, crt-geom, default = plain, ...).
 #   MAME saves the choice in ~/.mame/cfg/stunrun.cfg and restores it next launch. First launch defaults to crt-geom-deluxe.
 # STUN60_CRT=deluxe|geom|off forces an effect for this launch (overrides the saved choice).
-# H (in-game) toggles the HD redraw when STUN60_HD is set.
+# H (in-game) toggles the HD redraw when STUN60_HD is set; Y toggles the HD title/map/HUD pictures + xBR text.
 # STUN60_SYNC=1: pace the game to the monitor refresh (-syncrefresh -waitvsync) instead of the game's ~60.2 Hz.
 export STUN60_CLOCK="${STUN60_CLOCK:-maincpu=3,gsp=4,adsp=8}"
 # STUN60_HD=SXxSY: second screen with the 3D scene redrawn at SX x SY the resolution (H toggles HD/original in-game).

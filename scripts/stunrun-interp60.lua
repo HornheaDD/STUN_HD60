@@ -1018,6 +1018,14 @@ local key_h = inp:code_from_token("KEYCODE_H")
 local keyh_was = false
 local hd_on = hdscr ~= nil
 do local f = io.open(HDF, "r"); if f then local v = f:read("l"); f:close(); if v == "off" then hd_on = false end end end
+-- Y toggles the HD extras for 2D (title screen, course map and HUD pictures upscaled, xBR-smoothed text); remembered.
+-- The custom build reads the output value stun60_hd2d_off on each HD frame.
+local HD2F = DATA and (DATA .. "/stun60-hd2d.txt") or (HOMED .. "/.mame/stun60-hd2d.txt")
+local key_y = inp:code_from_token("KEYCODE_Y")
+local keyy_was = false
+local hd2d_on = true
+do local f = io.open(HD2F, "r"); if f then local v = f:read("l"); f:close(); if v == "off" then hd2d_on = false end end end
+mach.output:set_value("stun60_hd2d_off", hd2d_on and 0 or 1)
 local hd_sx, hd_sy = 3, 5
 do local a, b = (os.getenv("STUN60_HD") or ""):match("^(%d+)x(%d+)$"); if a then hd_sx, hd_sy = tonumber(a), tonumber(b) end end
 local dscr, kx, ky = scr, 1, 1   -- screen the overlay is drawn on, and the scale from 512x240 coordinates
@@ -1078,6 +1086,19 @@ local function hd_toggle()
   L("hd: " .. tostring(hd_on))
 end
 STUN60_HD_TOGGLE = hd_toggle   -- for headless/scripted tests
+local function hd2d_toggle()
+  if hdscr then
+    hd2d_on = not hd2d_on
+    mach.output:set_value("stun60_hd2d_off", hd2d_on and 0 or 1)
+    local f = io.open(HD2F, "w"); if f then f:write(hd2d_on and "on" or "off", "\n"); f:close() end
+    crt_msg = hd2d_on and "HD title, map, HUD and text on" or "HD title, map, HUD and text off"
+  else
+    crt_msg = "HD redraw not enabled (STUN60_HD)"
+  end
+  crt_msg_until = mach.time:as_double() + 2.5
+  L("hd2d: " .. tostring(hd2d_on))
+end
+STUN60_HD2D_TOGGLE = hd2d_toggle   -- for headless/scripted tests
 local low_secs = 0           -- seconds of gameplay in a row with few in-between frames
 local function overlay_second()  -- called once per second, after the counters are latched
   -- only ADSP-time skips count: screens that are slow for the GSP (e.g. the attract-mode story panel,
@@ -1101,6 +1122,9 @@ function draw_overlay()
   local kh = inp:code_pressed(key_h)
   if kh and not keyh_was then hd_toggle() end
   keyh_was = kh
+  local ky = inp:code_pressed(key_y)
+  if ky and not keyy_was then hd2d_toggle() end
+  keyy_was = ky
   if hd_applied ~= hd_on then apply_hd() end
   if crt_msg and mach.time:as_double() < crt_msg_until then
     dbox(156, 4, 356, 18, 0xff000000, 0xff000000)   -- solid black box, top centre
