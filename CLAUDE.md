@@ -6,21 +6,25 @@ backups) are in ~/CLAUDE.md on the user's PC and must NOT be copied here. Paths 
 Build tree (not in git): ~/mame/build/mame-mame0285 = MAME 0.285 source + stun60-mame0285.patch. ROMs (not in git): ~/mame/roms.
 
 ## CURRENT STATE (2026-11-21). Start with this section.
-**HD title / course map / HUD + xBR text DONE (2026-11-21), local commits only, not released, not pushed.** User tried it:
-"looks ok, but some people won't like it", unhappy that the pack nearly doubled; not sure about releasing it at all.
-So (same day, 2nd commit): **Y key** toggles these "2D extras" (whole-screen images + xBR) off/on, remembered in
-stun60-hd2d.txt (data dir), passed to C++ as MAME output value `stun60_hd2d_off` (read on the emulation thread before each
-HD compose -> m_hd_2d). **Pack files compressed**: S60BG04 = zlib planes R,G,B,pen; S60BG03 still read, and the builder
-thread rewrites 03 files as 04 in the background (35 files in 3.8 s): user's pack 135 MB -> 24 MB (lossless, checked).
-Verify 1815/1815, drawn 51.9 / ticks 19.00, 160% unthrottled (same as before). User's own hdpack/pack is still 03 (135 MB)
-until their next launch converts it. User to try the Y key live; then decide on release/push.
-Empty-pack first launch: title/HUD/map + level 1 skyline at 18.8 s (skyline was 3.5 s before), all 35 at 51.6 s.
+**STUN_HD60 hd-v1.5 RELEASED (2026-11-21), paused for the day.** HD title screen / course map / HUD panel / high-score frame
+(Real-ESRGAN, pixels doubled first), xBR-smoothed live 2D text, **Y key** toggles those 2D extras off/on (remembered in
+stun60-hd2d.txt in the data dir; passed to C++ as MAME output value `stun60_hd2d_off`, read on the emulation thread before
+each HD compose -> m_hd_2d), and the **HD pack compressed** (S60BG04 = zlib planes R,G,B,pen; S60BG03 still read, the builder
+thread rewrites 03 files as 04 in the background: 35 files in 3.8 s, 135 MB -> 24 MB, lossless). User feedback before the
+toggle: "looks ok, but I can see some people not liking that option", didn't like the pack nearly doubling.
+- Release: new binaries (./build.sh package + windows), stripped into package/STUNRunnerHD60.AppDir and
+  package/out-hd/STUNRunnerHD60-windows/bin; archives in package/out-hd/ (v1.4 copies in out-hd-v1.4/; notes source
+  package/out-hd/notes-v15.md, ignored). Tests: verify 1815/1815, drawn 51.9 / ticks 19.00 (= v1.4), 160% unthrottled with HD
+  always on; Y toggle snapshot check; AppImage fresh HOME: 35 images in 68.5 s, 24 MB, 60 fps / 20 ticks; Windows zip under
+  Wine 11 (fresh prefix, launcher): 35 images, byte-identical to the Linux pack, 60 / 20.
+- The user's own ~/mame/hdpack/pack is still S60BG03 (135 MB) until their next launch converts it (automatic).
+- Empty-pack first launch: title/HUD/map + level 1 skyline at ~19 s (skyline alone used to be 3.5 s), all 35 at ~52 s.
 Details: "HD whole screens + xBR text" at the end. Possible follow-ups (ask): story-panel sprite 02 via Real-ESRGAN (its
 text is still resampled source pixels), xBR look of the HUD "0" digits (pointy tips), python build_pack.py parity (it still
-writes S60BG03; fine, converted on load by the builder), release hd-v1.5 (binaries change: Linux + Windows rebuild).
+writes S60BG03; fine, converted by the builder), widescreen 16:9 probe.
 Released before: STUN_HD60 **hd-v1.4** (2026-11-20): HD anti-aliasing, HD sprites, HD compose pipeline (1 frame HD delay), pilot
 walk glide; new binaries (Linux package build + Windows). Before that hd-v1.3 (model morph, script-only).
-- Packages in package/out-hd/ (v1.3 copies in out-hd-v1.3/; release notes source package/out-hd/notes-v14.md, ignored).
+- v1.4 packages now in package/out-hd-v1.4/ (v1.3 in out-hd-v1.3/; notes source package/out-hd/notes-v14.md, ignored).
   Smoke tests: tar.gz scripted verify 700/700 (fake HOME), AppImage boots, fresh-HOME AppImage at normal speed built all 27
   HD backgrounds (level 1 at 9.7 s, all 39.9 s with the user's browser loading the PC), Wine run 60 s with HD always on:
   AA 2x2 4 threads, morph on, 198%, clean exit.
